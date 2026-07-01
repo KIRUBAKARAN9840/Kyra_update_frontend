@@ -17,7 +17,7 @@ import {
 import { LinearGradient } from "expo-linear-gradient";
 import { Ionicons, MaterialIcons } from "@expo/vector-icons";
 import { MaskedText } from "../../../components/ui/MaskedText";
-import { useAudioRecorder, useAudioRecorderState } from "expo-audio";
+import { useAudioRecorder, useAudioRecorderState, AudioModule, RecordingPresets, setAudioModeAsync } from "expo-audio";
 import axios from "axios";
 import axiosInstance from "../../../services/axiosInstance";
 import * as SecureStore from "expo-secure-store";
@@ -191,6 +191,18 @@ export default function KyraAI() {
   const [messages, setMessages] = useState([]);
   const [keyboardHeight, setKeyboardHeight] = useState(0);
 
+  // WhatsApp recording UI animations
+  const waveAnims = useRef([
+    new Animated.Value(0.2),
+    new Animated.Value(0.5),
+    new Animated.Value(0.8),
+    new Animated.Value(0.4),
+    new Animated.Value(0.6),
+  ]).current;
+  const waveLoop = useRef(null);
+  const pulseAnim = useRef(new Animated.Value(1)).current;
+  const pulseLoop = useRef(null);
+
   // Audio state
   const [isRecording, setIsRecording] = useState(false);
   const [recordingDuration, setRecordingDuration] = useState(0);
@@ -273,6 +285,71 @@ export default function KyraAI() {
       hideSub.remove();
     };
   }, []);
+
+  // ── WhatsApp recording UI animations loop ──
+  useEffect(() => {
+    if (isRecording) {
+      // Start pulse animation for mic icon
+      pulseAnim.setValue(1);
+      pulseLoop.current = Animated.loop(
+        Animated.sequence([
+          Animated.timing(pulseAnim, {
+            toValue: 0.3,
+            duration: 600,
+            useNativeDriver: true,
+          }),
+          Animated.timing(pulseAnim, {
+            toValue: 1,
+            duration: 600,
+            useNativeDriver: true,
+          }),
+        ])
+      );
+      pulseLoop.current.start();
+
+      // Start wave animations
+      const createWaveAnim = (val) => {
+        return Animated.loop(
+          Animated.sequence([
+            Animated.timing(val, {
+              toValue: Math.random() * 0.8 + 0.2,
+              duration: 150 + Math.random() * 150,
+              useNativeDriver: false,
+            }),
+            Animated.timing(val, {
+              toValue: Math.random() * 0.4 + 0.1,
+              duration: 150 + Math.random() * 150,
+              useNativeDriver: false,
+            }),
+          ])
+        );
+      };
+      
+      waveLoop.current = waveAnims.map((anim) => {
+        const loop = createWaveAnim(anim);
+        loop.start();
+        return loop;
+      });
+    } else {
+      // Stop animations
+      if (pulseLoop.current) {
+        pulseLoop.current.stop();
+        pulseLoop.current = null;
+      }
+      pulseAnim.setValue(1);
+
+      if (waveLoop.current) {
+        waveLoop.current.forEach((loop) => loop.stop());
+        waveLoop.current = null;
+      }
+      waveAnims.forEach((anim) => anim.setValue(0.2));
+    }
+
+    return () => {
+      if (pulseLoop.current) pulseLoop.current.stop();
+      if (waveLoop.current) waveLoop.current.forEach((loop) => loop.stop());
+    };
+  }, [isRecording]);
 
   const requestPermissions = async () => {
     try {
@@ -380,7 +457,22 @@ export default function KyraAI() {
       return;
     }
     try {
-      await audioRecorder.prepare(RecordingPresets.HIGH_QUALITY);
+      await setAudioModeAsync({
+        playsInSilentMode: true,
+        allowsRecording: true,
+        shouldDuckAndroid: true,
+        playThroughEarpieceAndroid: false,
+        ...(Platform.OS === "ios" && {
+          staysActiveInBackground: false,
+          interruptionMode: "mixWithOthers",
+        }),
+      });
+
+      if (Platform.OS === "ios") {
+        await new Promise((res) => setTimeout(res, 500));
+      }
+
+      await audioRecorder.prepareToRecordAsync();
       await audioRecorder.record();
     } catch (err) {
       console.error("Failed to start recording:", err);
@@ -389,8 +481,8 @@ export default function KyraAI() {
 
   const stopRecording = async () => {
     try {
-      await audioRecorder.stop();
-      const uri = recorderState.uri;
+      const result = await audioRecorder.stop();
+      const uri = recorderState.uri || audioRecorder.uri || (result && result.uri) || (result && result.url);
       if (uri) {
         await handleVoiceMessage(uri);
       }
@@ -403,11 +495,6 @@ export default function KyraAI() {
     try {
       await audioRecorder.stop();
       setRecordingDuration(0);
-      setIsRecording(false);
-      if (durationInterval.current) {
-        clearInterval(durationInterval.current);
-        durationInterval.current = null;
-      }
     } catch (err) {
       console.error("Failed to cancel recording:", err);
     }
@@ -672,39 +759,6 @@ export default function KyraAI() {
     return `${mins}:${secs.toString().padStart(2, "0")}`;
   };
 
-  const renderRecordingIndicator = () => {
-    if (!isRecording) return null;
-    return (
-      <Modal transparent={true} visible={isRecording} animationType="fade">
-        <View style={styles.recordingOverlay}>
-          <View style={styles.recordingContainer}>
-            <View style={styles.recordingPulse}>
-              <Ionicons name="mic" size={40} color="#FF4444" />
-            </View>
-            <Text style={styles.recordingText}>Recording Voice Message</Text>
-            <Text style={styles.recordingDuration}>
-              {formatDuration(recordingDuration)}
-            </Text>
-            <View style={styles.recordingActions}>
-              <TouchableOpacity
-                style={[styles.recordingButton, styles.cancelButton]}
-                onPress={cancelRecording}
-              >
-                <Ionicons name="close" size={24} color="#FFF" />
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.recordingButton, styles.stopButton]}
-                onPress={stopRecording}
-              >
-                <Ionicons name="checkmark" size={24} color="#FFF" />
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
-    );
-  };
-
   return (
     <View style={styles.container}>
       {/* Header */}
@@ -786,72 +840,125 @@ export default function KyraAI() {
           ]}
         >
           <View style={styles.inputContainer}>
-            <View style={styles.inputWrapper}>
-              <TextInput
-                style={styles.textInput}
-                value={inputText}
-                onChangeText={setInputText}
-                placeholder={
-                  hasAudioPermission
-                    ? "Type or hold mic to record..."
-                    : "Type your message..."
-                }
-                placeholderTextColor="#999"
-                multiline
-                maxLength={500}
-                editable={!isRecording}
-              />
+            {isRecording ? (
+              <>
+                <View style={styles.recordingWrapper}>
+                  {/* Blinking blue mic */}
+                  <Animated.View style={{ opacity: pulseAnim }}>
+                    <Ionicons name="mic" size={20} color="#006FAD" />
+                  </Animated.View>
 
-              {/* Microphone button */}
-              <TouchableOpacity
-                style={[
-                  styles.voiceButton,
-                  isRecording && styles.voiceButtonRecording,
-                  !hasAudioPermission && styles.voiceButtonDisabled,
-                ]}
-                onPress={isRecording ? stopRecording : startRecording}
-                disabled={isTyping || isThinking}
-              >
-                <MaterialIcons
-                  name={isRecording ? "mic" : "mic-none"}
-                  size={20}
-                  color={
-                    !hasAudioPermission
-                      ? "#999"
-                      : isRecording
-                        ? "#FF4444"
-                        : "#006FAD"
-                  }
-                />
-              </TouchableOpacity>
-            </View>
+                  {/* Timer */}
+                  <Text style={styles.recordingTimer}>
+                    {formatDuration(recordingDuration)}
+                  </Text>
 
-            {/* Send button */}
-            <TouchableOpacity
-              style={[
-                styles.sendButton,
-                inputText.trim() && !isTyping && !isThinking && !isRecording
-                  ? styles.sendButtonActive
-                  : styles.sendButtonInactive,
-              ]}
-              onPress={sendMessage}
-              disabled={!inputText.trim() || isTyping || isThinking || isRecording}
-            >
-              <LinearGradient
-                colors={
-                  inputText.trim() && !isTyping && !isThinking && !isRecording
-                    ? ["#25ACE5", "#006FAD"]
-                    : ["#E0E0E0", "#BDBDBD"]
-                }
-                style={styles.sendButtonGradient}
-              >
-                {isThinking || isTyping ? (
-                  <ActivityIndicator size="small" color="#FFF" />
-                ) : (
-                  <MaterialIcons name="send" size={20} color="#FFF" />
-                )}
-              </LinearGradient>
-            </TouchableOpacity>
+                  {/* Animated Waveform */}
+                  <View style={styles.wavesContainer}>
+                    {waveAnims.map((anim, idx) => (
+                      <Animated.View
+                        key={idx}
+                        style={[
+                          styles.waveBar,
+                          {
+                            height: anim.interpolate({
+                              inputRange: [0, 1],
+                              outputRange: [4, 20],
+                            }),
+                          },
+                        ]}
+                      />
+                    ))}
+                  </View>
+
+                  {/* Cancel Button */}
+                  <TouchableOpacity
+                    style={styles.recordingCancelBtn}
+                    onPress={cancelRecording}
+                  >
+                    <Ionicons name="trash-outline" size={20} color="#666" />
+                  </TouchableOpacity>
+                </View>
+
+                {/* Send/Stop recording button */}
+                <TouchableOpacity
+                  style={styles.sendButton}
+                  onPress={stopRecording}
+                >
+                  <LinearGradient
+                    colors={["#25ACE5", "#006FAD"]}
+                    style={styles.sendButtonGradient}
+                  >
+                    <Ionicons name="send" size={18} color="#FFF" />
+                  </LinearGradient>
+                </TouchableOpacity>
+              </>
+            ) : (
+              <>
+                <View style={styles.inputWrapper}>
+                  <TextInput
+                    style={styles.textInput}
+                    value={inputText}
+                    onChangeText={setInputText}
+                    placeholder="Type your message..."
+                    placeholderTextColor="#999"
+                    multiline
+                    maxLength={500}
+                    editable={!isRecording}
+                  />
+
+                  {/* Microphone button */}
+                  <TouchableOpacity
+                    style={[
+                      styles.voiceButton,
+                      isRecording && styles.voiceButtonRecording,
+                      !hasAudioPermission && styles.voiceButtonDisabled,
+                    ]}
+                    onPress={isRecording ? stopRecording : startRecording}
+                    disabled={isTyping || isThinking}
+                  >
+                    <MaterialIcons
+                      name={isRecording ? "mic" : "mic-none"}
+                      size={20}
+                      color={
+                        !hasAudioPermission
+                          ? "#999"
+                          : isRecording
+                            ? "#FF4444"
+                            : "#006FAD"
+                      }
+                    />
+                  </TouchableOpacity>
+                </View>
+
+                {/* Send button */}
+                <TouchableOpacity
+                  style={[
+                    styles.sendButton,
+                    inputText.trim() && !isTyping && !isThinking && !isRecording
+                      ? styles.sendButtonActive
+                      : styles.sendButtonInactive,
+                  ]}
+                  onPress={sendMessage}
+                  disabled={!inputText.trim() || isTyping || isThinking || isRecording}
+                >
+                  <LinearGradient
+                    colors={
+                      inputText.trim() && !isTyping && !isThinking && !isRecording
+                        ? ["#25ACE5", "#006FAD"]
+                        : ["#E0E0E0", "#BDBDBD"]
+                    }
+                    style={styles.sendButtonGradient}
+                  >
+                    {isThinking || isTyping ? (
+                      <ActivityIndicator size="small" color="#FFF" />
+                    ) : (
+                      <MaterialIcons name="send" size={20} color="#FFF" />
+                    )}
+                  </LinearGradient>
+                </TouchableOpacity>
+              </>
+            )}
           </View>
 
           {/* AI Disclaimer */}
@@ -863,9 +970,6 @@ export default function KyraAI() {
           </View>
         </SafeAreaView>
       </KeyboardAvoidingView>
-
-      {/* Recording overlay modal */}
-      {renderRecordingIndicator()}
 
       {/* AI Consent Modal */}
       <Modal
@@ -1027,59 +1131,38 @@ const styles = StyleSheet.create({
     textAlign: "center",
   },
 
-  recordingOverlay: {
-    position: "absolute",
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: "rgba(0,0,0,0.6)",
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  recordingContainer: {
-    backgroundColor: "#FFF",
-    borderRadius: 20,
-    padding: 30,
-    alignItems: "center",
-    width: width * 0.8,
-  },
-  recordingPulse: {
-    width: 70,
-    height: 70,
-    borderRadius: 35,
-    backgroundColor: "#FFE5E5",
-    justifyContent: "center",
-    alignItems: "center",
-    marginBottom: 15,
-  },
-  recordingText: {
-    fontSize: 16,
-    fontWeight: "600",
-    color: "#333",
-    marginBottom: 6,
-  },
-  recordingDuration: {
-    fontSize: 22,
-    fontWeight: "bold",
-    color: "#FF4444",
-    marginBottom: 20,
-  },
-  recordingActions: {
+  recordingWrapper: {
+    flex: 1,
     flexDirection: "row",
-    justifyContent: "space-between",
-    width: 140,
-  },
-  recordingButton: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    justifyContent: "center",
     alignItems: "center",
-    elevation: 3,
+    backgroundColor: "#E6F7FF",
+    borderRadius: 25,
+    paddingHorizontal: 16,
+    paddingVertical: 6,
+    minHeight: 48,
   },
-  cancelButton: { backgroundColor: "#FF5E5E" },
-  stopButton: { backgroundColor: "#4CAF50" },
+  recordingTimer: {
+    fontSize: 14,
+    fontWeight: "600",
+    color: "#006FAD",
+    marginLeft: 8,
+  },
+  wavesContainer: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 3,
+    marginHorizontal: 12,
+  },
+  waveBar: {
+    width: 3,
+    borderRadius: 1.5,
+    backgroundColor: "#006FAD",
+  },
+  recordingCancelBtn: {
+    padding: 4,
+  },
 
   modalOverlay: {
     flex: 1,
