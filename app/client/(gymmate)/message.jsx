@@ -313,7 +313,7 @@ export default function Message() {
             limit: 40,
           });
           if (msgs.length > 0) {
-            markChatRoomReadAPI(roomId, msgs[0].message_id).catch(() => {});
+            markChatRoomReadAPI(roomId, msgs[0].message_id).catch(() => { });
           }
         } else {
           dispatch({
@@ -346,7 +346,7 @@ export default function Message() {
           // Backend frame shape: { type, room_id, message: { sender_client_id, message_id, ... } }
           const msg = frame.message;
           if (msg && msg.sender_client_id !== myClientIdRef.current) {
-            markChatRoomReadAPI(roomId, msg.message_id).catch(() => {});
+            markChatRoomReadAPI(roomId, msg.message_id).catch(() => { });
           }
           break;
         }
@@ -473,7 +473,7 @@ export default function Message() {
                   });
                 });
               }
-            } catch {}
+            } catch { }
             setDeleting(false);
             setSelectedIds(new Set());
           },
@@ -552,7 +552,7 @@ export default function Message() {
     try {
       const res = await getSessionParticipantsAPI(sessionId);
       if (res?.status === 200) setMembersList(res.data || []);
-    } catch {}
+    } catch { }
     setMembersLoading(false);
   }, [isGroup, sessionId]);
 
@@ -1067,7 +1067,7 @@ export default function Message() {
                   style={[
                     s.reportOption,
                     selectedReason?.key === reason.key &&
-                      s.reportOptionSelected,
+                    s.reportOptionSelected,
                   ]}
                   activeOpacity={0.7}
                   onPress={() => setSelectedReason(reason)}
@@ -1076,7 +1076,7 @@ export default function Message() {
                     style={[
                       s.reportRadio,
                       selectedReason?.key === reason.key &&
-                        s.reportRadioSelected,
+                      s.reportRadioSelected,
                     ]}
                   >
                     {selectedReason?.key === reason.key && (
@@ -1087,7 +1087,7 @@ export default function Message() {
                     style={[
                       s.reportOptionText,
                       selectedReason?.key === reason.key &&
-                        s.reportOptionTextSelected,
+                      s.reportOptionTextSelected,
                     ]}
                   >
                     {reason.label}

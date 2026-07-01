@@ -626,7 +626,7 @@ export const addClientDietAIAPI = async (payload) => {
 
 export const closeChatbotAPI = async (payload) => {
   try {
-    const res = await axiosInstance.post(`/chatbot/delete_chat`, payload);
+    const res = await axiosInstance.post(`/api/v2/chatbot/delete_chat`, payload);
     return res?.data;
   } catch (err) {
     return err?.response.data;
