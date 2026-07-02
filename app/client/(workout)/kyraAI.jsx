@@ -527,7 +527,7 @@ export default function KyraAI() {
         ),
       );
 
-      await sendStreamingMessage(transcript);
+      await sendStreamingMessage(transcript, "audio");
     } catch (err) {
       console.error("Voice processing error:", err);
       setIsThinking(false);
@@ -547,7 +547,7 @@ export default function KyraAI() {
     }
   };
 
-  const sendStreamingMessage = async (messageText) => {
+  const sendStreamingMessage = async (messageText, requestType = "text") => {
     setIsThinking(false);
     setIsTyping(true);
     const aiId = `ai-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
@@ -611,7 +611,7 @@ export default function KyraAI() {
       const token = await chatbotAPI.getValidToken();
       if (!token) throw new Error("Failed to get valid token");
 
-      const endpoint = `/api/v2/chatbot/chat/stream_test?user_id=${encodeURIComponent(clientId)}`;
+      const endpoint = `/api/v2/chatbot/chat/stream_test?user_id=${encodeURIComponent(clientId)}&request_type=${requestType}`;
       const es = await chatbotAPI.openSSE({
         text: messageText,
         endpoint,
@@ -676,7 +676,7 @@ export default function KyraAI() {
     setIsThinking(true);
 
     try {
-      await sendStreamingMessage(txt);
+      await sendStreamingMessage(txt, "text");
     } catch (err) {
       console.error("SSE error:", err);
       setIsThinking(false);
