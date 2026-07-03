@@ -947,6 +947,59 @@ export default function KyraAI() {
     );
   };
 
+  const ThreeDotLoader = () => {
+    const dot1 = useRef(new Animated.Value(0)).current;
+    const dot2 = useRef(new Animated.Value(0)).current;
+    const dot3 = useRef(new Animated.Value(0)).current;
+
+    useEffect(() => {
+      const animateDot = (dot, delay) => {
+        return Animated.sequence([
+          Animated.delay(delay),
+          Animated.loop(
+            Animated.sequence([
+              Animated.timing(dot, {
+                toValue: -6,
+                duration: 250,
+                useNativeDriver: true,
+              }),
+              Animated.timing(dot, {
+                toValue: 0,
+                duration: 250,
+                useNativeDriver: true,
+              }),
+              Animated.timing(dot, {
+                toValue: 0,
+                duration: 500,
+                useNativeDriver: true,
+              }),
+            ])
+          ),
+        ]);
+      };
+
+      const animation = Animated.parallel([
+        animateDot(dot1, 0),
+        animateDot(dot2, 150),
+        animateDot(dot3, 300),
+      ]);
+
+      animation.start();
+
+      return () => {
+        animation.stop();
+      };
+    }, [dot1, dot2, dot3]);
+
+    return (
+      <View style={styles.threeDotContainer}>
+        <Animated.View style={[styles.threeDot, { transform: [{ translateY: dot1 }] }]} />
+        <Animated.View style={[styles.threeDot, { transform: [{ translateY: dot2 }] }]} />
+        <Animated.View style={[styles.threeDot, { transform: [{ translateY: dot3 }] }]} />
+      </View>
+    );
+  };
+
   const renderMessage = ({ item }) => {
     const isUser = item.isUser;
     return (
@@ -973,7 +1026,13 @@ export default function KyraAI() {
           ) : (
             <View style={styles.aiBubbleContent}>
               {renderAttachments(item.documents, false)}
-              {item.text && renderMessageText(item.text, false)}
+              {item.text ? (
+                renderMessageText(item.text, false)
+              ) : (
+                <View style={styles.streamingLoaderWrapper}>
+                  <ThreeDotLoader />
+                </View>
+              )}
             </View>
           )}
         </View>
@@ -1639,5 +1698,26 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: "#666",
     marginTop: 2,
+  },
+  streamingLoaderWrapper: {
+    padding: 6,
+    justifyContent: "center",
+    alignItems: "center",
+    minWidth: 40,
+    minHeight: 24,
+  },
+  threeDotContainer: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    gap: 4,
+  },
+  threeDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
+    backgroundColor: "#006FAD",
   },
 });
