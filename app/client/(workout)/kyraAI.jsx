@@ -13,6 +13,7 @@ import {
   ActivityIndicator,
   Modal,
   Keyboard,
+  Linking,
 } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
 import { Ionicons, MaterialIcons } from "@expo/vector-icons";
@@ -22,6 +23,8 @@ import axios from "axios";
 import axiosInstance from "../../../services/axiosInstance";
 import * as SecureStore from "expo-secure-store";
 import EventSource from "react-native-sse";
+import * as FileSystem from "expo-file-system/legacy";
+import * as ImagePicker from "expo-image-picker";
 import { Image } from "expo-image";
 import { useRouter, useFocusEffect } from "expo-router";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -179,6 +182,17 @@ const chatbotAPI = {
     const data = await res.json();
     return data.transcript || "";
   },
+
+  getUploadUrl: async (user_id, fileName, contentType) => {
+    const res = await axiosInstance.get(`/api/v2/chatbot/chat/upload-url`, {
+      params: {
+        user_id,
+        file_name: fileName,
+        content_type: contentType,
+      },
+    });
+    return res?.data;
+  },
 };
 
 export default function KyraAI() {
@@ -190,6 +204,14 @@ export default function KyraAI() {
   const [inputText, setInputText] = useState("");
   const [messages, setMessages] = useState([]);
   const [keyboardHeight, setKeyboardHeight] = useState(0);
+
+  const [selectedImage, setSelectedImage] = useState(null);
+  const [isUploadingImage, setIsUploadingImage] = useState(false);
+
+  const handleRemoveSelectedImage = () => {
+    setSelectedImage(null);
+    setIsUploadingImage(false);
+  };
 
   // WhatsApp recording UI animations
   const waveAnims = useRef([
@@ -547,7 +569,113 @@ export default function KyraAI() {
     }
   };
 
-  const sendStreamingMessage = async (messageText, requestType = "text") => {
+  const formatBytes = (bytes, decimals = 2) => {
+    if (!bytes) return "0 Bytes";
+    const k = 1024;
+    const dm = decimals < 0 ? 0 : decimals;
+    const sizes = ["Bytes", "KB", "MB", "GB"];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + " " + sizes[i];
+  };
+
+  const handleDocumentPick = async () => {
+    try {
+      // 1. Request media library permission
+      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (status !== "granted") {
+        alert("Permission required to access your photo library.");
+        return;
+      }
+
+      // 2. Open the image picker (gallery)
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsEditing: false,
+        quality: 0.8,
+        base64: false,
+        exif: false,
+      });
+
+      // User cancelled
+      if (result.canceled || !result.assets || result.assets.length === 0) {
+        return;
+      }
+
+      const asset = result.assets[0];
+      const uri = asset.uri;
+
+      // Derive file name and mime type from the picked asset
+      const fileName = uri.split("/").pop() || `image_${Date.now()}.jpg`;
+      const ext = fileName.split(".").pop().toLowerCase();
+      const mimeTypeMap = {
+        jpg: "image/jpeg",
+        jpeg: "image/jpeg",
+        png: "image/png",
+        webp: "image/webp",
+        gif: "image/gif",
+        heic: "image/heic",
+      };
+      const mimeType = asset.mimeType || mimeTypeMap[ext] || "image/jpeg";
+      const size = asset.fileSize || 0;
+
+      // Stage the image locally and set loading
+      setSelectedImage({
+        uri: uri,
+        name: fileName,
+        mimeType: mimeType,
+        size: size,
+        attachment: null,
+      });
+      setIsUploadingImage(true);
+
+      // 3. Get presigned upload URL from backend
+      const response = await chatbotAPI.getUploadUrl(clientId, fileName, mimeType);
+      if (!response || !response.success) {
+        throw new Error("Failed to get presigned upload URL");
+      }
+
+      const { upload, cdn_url, key } = response.data;
+
+      // 4. Upload the selected image to S3 via FileSystem.uploadAsync
+      const uploadResult = await FileSystem.uploadAsync(upload.url, uri, {
+        httpMethod: "POST",
+        uploadType: FileSystem.FileSystemUploadType?.MULTIPART ?? 1,
+        fieldName: "file",
+        parameters: upload.fields,
+      });
+
+      if (uploadResult.status !== 200 && uploadResult.status !== 204) {
+        throw new Error(`Upload failed with status ${uploadResult.status}`);
+      }
+
+      // 5. Build attachment
+      const attachment = {
+        file_name: fileName,
+        file_size: size,
+        mime_type: mimeType,
+        s3_key: key,
+        s3_url: cdn_url,
+      };
+
+      // Set attachment as ready
+      setSelectedImage({
+        uri: uri,
+        name: fileName,
+        mimeType: mimeType,
+        size: size,
+        attachment: attachment,
+      });
+      setIsUploadingImage(false);
+
+    } catch (error) {
+      console.error("Image upload failed:", error);
+      alert("Failed to upload image. Please try again.");
+      setSelectedImage(null);
+      setIsUploadingImage(false);
+    }
+  };
+
+  const sendStreamingMessage = async (messageText, requestType = "text", attachments = []) => {
     setIsThinking(false);
     setIsTyping(true);
     const aiId = `ai-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
@@ -611,7 +739,10 @@ export default function KyraAI() {
       const token = await chatbotAPI.getValidToken();
       if (!token) throw new Error("Failed to get valid token");
 
-      const endpoint = `/api/v2/chatbot/chat/stream_test?user_id=${encodeURIComponent(clientId)}&request_type=${requestType}`;
+      let endpoint = `/api/v2/chatbot/chat/stream_test?user_id=${encodeURIComponent(clientId)}&request_type=${requestType}`;
+      if (attachments && attachments.length > 0) {
+        endpoint += `&attachments=${encodeURIComponent(JSON.stringify(attachments))}`;
+      }
       const es = await chatbotAPI.openSSE({
         text: messageText,
         endpoint,
@@ -660,29 +791,160 @@ export default function KyraAI() {
   const sendMessage = async () => {
     playMessageSentSound();
     const txt = inputText.trim();
-    if (!txt || isTyping || isThinking || isRecording) return;
+    if ((!txt && !selectedImage) || isTyping || isThinking || isRecording || isUploadingImage) return;
+
+    const currentImage = selectedImage;
+    setSelectedImage(null);
+    setInputText("");
+
+    const msgId = `user-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const attachments = currentImage && currentImage.attachment ? [currentImage.attachment] : [];
+    const messageText = txt || (currentImage ? `Sent image: ${currentImage.name}` : "");
 
     setMessages((prev) => [
       ...prev,
       {
-        id: `user-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-        text: txt,
+        id: msgId,
+        text: messageText,
         isUser: true,
         timestamp: new Date(),
         isComplete: true,
+        isDocument: !!currentImage,
+        documents: attachments,
       },
     ]);
-    setInputText("");
     setIsThinking(true);
 
     try {
-      await sendStreamingMessage(txt, "text");
+      if (currentImage) {
+        await sendStreamingMessage(messageText, "document", attachments);
+      } else {
+        await sendStreamingMessage(messageText, "text");
+      }
     } catch (err) {
       console.error("SSE error:", err);
       setIsThinking(false);
       setIsTyping(false);
       safeCloseSSE();
     }
+  };
+
+  const renderAttachments = (documents, isUser) => {
+    if (!documents || documents.length === 0) return null;
+
+    return (
+      <View style={styles.attachmentsContainer}>
+        {documents.map((doc, idx) => {
+          const isImage = doc.mime_type.startsWith("image/");
+          return (
+            <TouchableOpacity
+              key={idx}
+              style={[
+                styles.attachmentCard,
+                isUser ? styles.userAttachmentCard : styles.aiAttachmentCard
+              ]}
+              onPress={() => {
+                Linking.openURL(doc.s3_url).catch((err) =>
+                  console.error("Failed to open document URL:", err)
+                );
+              }}
+            >
+              <View style={styles.attachmentIconWrapper}>
+                <Ionicons
+                  name={isImage ? "image" : "document-text"}
+                  size={24}
+                  color={isUser ? "#FFF" : "#006FAD"}
+                />
+              </View>
+              <View style={styles.attachmentMeta}>
+                <Text
+                  numberOfLines={1}
+                  style={[
+                    styles.attachmentName,
+                    isUser ? styles.userAttachmentText : styles.aiAttachmentText
+                  ]}
+                >
+                  {doc.file_name}
+                </Text>
+                <Text
+                  style={[
+                    styles.attachmentSize,
+                    isUser ? styles.userAttachmentSubtext : styles.aiAttachmentSubtext
+                  ]}
+                >
+                  {formatBytes(doc.file_size)}
+                </Text>
+              </View>
+              <Ionicons
+                name="open-outline"
+                size={16}
+                color={isUser ? "rgba(255,255,255,0.7)" : "#666"}
+              />
+            </TouchableOpacity>
+          );
+        })}
+      </View>
+    );
+  };
+
+  const renderMessageText = (text, isUser) => {
+    if (!text) return null;
+
+    const textStyle = isUser ? styles.userMessageText : styles.aiMessageText;
+    const boldStyle = { fontWeight: "700" };
+    const lines = text.split("\n");
+
+    return (
+      <Text style={textStyle}>
+        {lines.map((line, lineIdx) => {
+          let isHeader = false;
+          let cleanLine = line;
+
+          // Match header markdown like: ### Header or ## Header
+          const headerMatch = line.match(/^(#{1,6})\s+(.+)$/);
+          if (headerMatch) {
+            isHeader = true;
+            cleanLine = headerMatch[2];
+          }
+
+          // Split cleanLine by **bold** parts
+          const parts = cleanLine.split(/(\*\*[^*]+\*\*)/g);
+
+          return (
+            <Text
+              key={lineIdx}
+              style={
+                isHeader
+                  ? [
+                      textStyle,
+                      boldStyle,
+                      {
+                        fontSize: 16,
+                        marginTop: lineIdx > 0 ? 8 : 2,
+                        marginBottom: 4,
+                        display: "flex",
+                      },
+                    ]
+                  : undefined
+              }
+            >
+              {parts.map((part, partIdx) => {
+                if (part.startsWith("**") && part.endsWith("**")) {
+                  const boldText = part.slice(2, -2);
+                  return (
+                    <Text key={partIdx} style={boldStyle}>
+                      {boldText}
+                    </Text>
+                  );
+                }
+                return part;
+              })}
+              {lineIdx < lines.length - 1 ? "\n" : ""}
+            </Text>
+          );
+        })}
+      </Text>
+    );
   };
 
   const renderMessage = ({ item }) => {
@@ -705,11 +967,13 @@ export default function KyraAI() {
               end={{ x: 1, y: 0 }}
               style={styles.userBubbleContent}
             >
-              <Text style={styles.userMessageText}>{item.text}</Text>
+              {renderAttachments(item.documents, true)}
+              {item.text && renderMessageText(item.text, true)}
             </LinearGradient>
           ) : (
             <View style={styles.aiBubbleContent}>
-              <Text style={styles.aiMessageText}>{item.text}</Text>
+              {renderAttachments(item.documents, false)}
+              {item.text && renderMessageText(item.text, false)}
             </View>
           )}
         </View>
@@ -839,6 +1103,36 @@ export default function KyraAI() {
             Platform.OS === "android" && { paddingBottom: keyboardHeight },
           ]}
         >
+          {selectedImage && (
+            <View style={styles.imagePreviewContainer}>
+              <View style={styles.imagePreviewWrapper}>
+                <Image
+                  source={{ uri: selectedImage.uri }}
+                  style={styles.imagePreviewThumbnail}
+                />
+                {isUploadingImage && (
+                  <View style={styles.imagePreviewLoading}>
+                    <ActivityIndicator size="small" color="#006FAD" />
+                  </View>
+                )}
+                <TouchableOpacity
+                  style={styles.imagePreviewCloseButton}
+                  onPress={handleRemoveSelectedImage}
+                >
+                  <Ionicons name="close-circle" size={20} color="#FF4444" />
+                </TouchableOpacity>
+              </View>
+              <View style={styles.imagePreviewTextWrapper}>
+                <Text style={styles.imagePreviewName} numberOfLines={1}>
+                  {selectedImage.name}
+                </Text>
+                <Text style={styles.imagePreviewStatus}>
+                  {isUploadingImage ? "Uploading to S3..." : "Ready to send"}
+                </Text>
+              </View>
+            </View>
+          )}
+
           <View style={styles.inputContainer}>
             {isRecording ? (
               <>
@@ -907,6 +1201,19 @@ export default function KyraAI() {
                     editable={!isRecording}
                   />
 
+                  {/* Attachment button */}
+                  <TouchableOpacity
+                    style={styles.attachmentButton}
+                    onPress={handleDocumentPick}
+                    disabled={isTyping || isThinking || isRecording}
+                  >
+                    <Ionicons
+                      name="attach"
+                      size={22}
+                      color="#006FAD"
+                    />
+                  </TouchableOpacity>
+
                   {/* Microphone button */}
                   <TouchableOpacity
                     style={[
@@ -935,16 +1242,16 @@ export default function KyraAI() {
                 <TouchableOpacity
                   style={[
                     styles.sendButton,
-                    inputText.trim() && !isTyping && !isThinking && !isRecording
+                    (inputText.trim() || (selectedImage && !isUploadingImage)) && !isTyping && !isThinking && !isRecording
                       ? styles.sendButtonActive
                       : styles.sendButtonInactive,
                   ]}
                   onPress={sendMessage}
-                  disabled={!inputText.trim() || isTyping || isThinking || isRecording}
+                  disabled={(!inputText.trim() && !selectedImage) || isUploadingImage || isTyping || isThinking || isRecording}
                 >
                   <LinearGradient
                     colors={
-                      inputText.trim() && !isTyping && !isThinking && !isRecording
+                      (inputText.trim() || (selectedImage && !isUploadingImage)) && !isTyping && !isThinking && !isRecording
                         ? ["#25ACE5", "#006FAD"]
                         : ["#E0E0E0", "#BDBDBD"]
                     }
@@ -1216,5 +1523,121 @@ const styles = StyleSheet.create({
   acceptButtonText: {
     color: "#FFF",
     fontWeight: "600",
+  },
+  attachmentButton: {
+    padding: 8,
+    marginRight: 2,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  attachmentsContainer: {
+    marginBottom: 8,
+    width: "100%",
+  },
+  attachmentCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    borderRadius: 8,
+    padding: 10,
+    width: "100%",
+    minWidth: 200,
+    marginBottom: 4,
+  },
+  userAttachmentCard: {
+    backgroundColor: "rgba(255, 255, 255, 0.15)",
+  },
+  aiAttachmentCard: {
+    backgroundColor: "#F0F4F8",
+    borderWidth: 1,
+    borderColor: "#E1E8ED",
+  },
+  attachmentIconWrapper: {
+    width: 36,
+    height: 36,
+    borderRadius: 6,
+    backgroundColor: "rgba(0,0,0,0.05)",
+    justifyContent: "center",
+    alignItems: "center",
+    marginRight: 10,
+  },
+  attachmentMeta: {
+    flex: 1,
+    marginRight: 8,
+  },
+  attachmentName: {
+    fontSize: 14,
+    fontWeight: "600",
+  },
+  userAttachmentText: {
+    color: "#FFF",
+  },
+  aiAttachmentText: {
+    color: "#333",
+  },
+  attachmentSize: {
+    fontSize: 11,
+    marginTop: 2,
+  },
+  userAttachmentSubtext: {
+    color: "rgba(255, 255, 255, 0.7)",
+  },
+  aiAttachmentSubtext: {
+    color: "#666",
+  },
+  imagePreviewContainer: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#F9F9F9",
+    borderTopWidth: 1,
+    borderBottomWidth: 1,
+    borderColor: "#EFEFEF",
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    width: "100%",
+  },
+  imagePreviewWrapper: {
+    position: "relative",
+    width: 50,
+    height: 50,
+    borderRadius: 8,
+  },
+  imagePreviewThumbnail: {
+    width: 50,
+    height: 50,
+    borderRadius: 8,
+  },
+  imagePreviewLoading: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(255, 255, 255, 0.7)",
+    justifyContent: "center",
+    alignItems: "center",
+    borderRadius: 8,
+  },
+  imagePreviewCloseButton: {
+    position: "absolute",
+    top: -6,
+    right: -6,
+    backgroundColor: "#FFF",
+    borderRadius: 10,
+    elevation: 2,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.2,
+    shadowRadius: 1,
+  },
+  imagePreviewTextWrapper: {
+    flex: 1,
+    marginLeft: 12,
+    justifyContent: "center",
+  },
+  imagePreviewName: {
+    fontSize: 13,
+    fontWeight: "600",
+    color: "#333",
+  },
+  imagePreviewStatus: {
+    fontSize: 11,
+    color: "#666",
+    marginTop: 2,
   },
 });
