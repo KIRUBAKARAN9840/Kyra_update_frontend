@@ -722,7 +722,7 @@ export default function KyraAI() {
           if (m.id === aiId) {
             return {
               ...m,
-              text: m.text + payload,
+              text: m.text + (m.text ? "\n" : "") + payload,
               isStreaming: true,
             };
           }
@@ -892,41 +892,119 @@ export default function KyraAI() {
 
     const textStyle = isUser ? styles.userMessageText : styles.aiMessageText;
     const boldStyle = { fontWeight: "700" };
-    const lines = text.split("\n");
+
+    // Normalize collapsed markdown (AI returns everything on one line)
+    let normalized = text
+      // Bold list items: ANY " - **" occurrence means a new list item
+      .replace(/ - \*\*/g, "\n- **")
+      // Dividers
+      .replace(/  ---  /g, "\n---\n")
+      .replace(/---/g, "\n---\n")
+      // Headers like "  ### Title" or "### Title" collapsed inline
+      .replace(/\s{1,}(#{1,6} )/g, "\n$1")
+      // Plain bullets after sentence end: ". - Capital" or "! - Capital"
+      .replace(/([.!?]) - ([A-Z])/g, "$1\n- $2")
+      // Plain bullets after colon: ": - Capital"
+      .replace(/: - ([A-Z])/g, ":\n- $1")
+      // 2-space and 3-space prefix bullets (fallback)
+      .replace(/  - /g, "\n- ")
+      .replace(/   - /g, "\n- ")
+      .replace(/\t- /g, "\n- ");
+
+    const lines = normalized.split("\n");
 
     return (
-      <Text style={textStyle}>
+      <View style={{ width: "100%" }}>
         {lines.map((line, lineIdx) => {
+          const trimmed = line.trim();
+          if (!trimmed) return null;
+
+          // 1. Handle horizontal divider `---`
+          if (trimmed === "---") {
+            return (
+              <View
+                key={lineIdx}
+                style={{
+                  height: 1,
+                  backgroundColor: isUser ? "rgba(255, 255, 255, 0.25)" : "#E2E8F0",
+                  marginVertical: 10,
+                  width: "100%",
+                }}
+              />
+            );
+          }
+
+          // 2. Handle lab parameter lines (e.g. - **Hemoglobin**: 15 g/dL (Normal: 14-16))
+          const paramRegex = /^-\s+\*\*([^*]+)\*\*:\s*([^(]+)(?:\((.+)\))?/;
+          const paramMatch = trimmed.match(paramRegex);
+          if (paramMatch && !isUser) {
+            const name = paramMatch[1].trim();
+            const value = paramMatch[2].trim();
+            const range = paramMatch[3] ? paramMatch[3].trim() : null;
+
+            // Check if line itself mentions Low/High status before the parenthesis
+            const fullLine = trimmed.toLowerCase();
+            const isHighInValue = value.toLowerCase().includes("high") || value.toLowerCase().includes("elevated");
+            const isLowInValue = value.toLowerCase().includes("low");
+            const isHighInRange = range && (range.toLowerCase().includes("high") || range.toLowerCase().includes("elevated"));
+            const isLowInRange = range && range.toLowerCase().includes("low");
+
+            const isHigh = isHighInValue || isHighInRange;
+            const isLow = isLowInValue || isLowInRange;
+
+            let statusColor = "#10B981"; // Green = normal
+            if (isHigh) statusColor = "#EF4444"; // Red
+            if (isLow) statusColor = "#F59E0B";  // Amber
+
+            // Clean the value if it contains "Low," or "High," prefix
+            const cleanValue = value
+              .replace(/^(low,?\s*|high,?\s*|elevated,?\s*)/i, "")
+              .trim();
+
+            return (
+              <View key={lineIdx} style={styles.labRow}>
+                <View style={styles.labRowLeft}>
+                  <Text style={styles.labParamName}>{name}</Text>
+                </View>
+                <View style={styles.labRowRight}>
+                  <Text style={[styles.labParamValue, { color: statusColor }]}>{cleanValue}</Text>
+                  {range && <Text style={styles.labParamRange}>{range}</Text>}
+                </View>
+              </View>
+            );
+          }
+
+          // 3. Handle header match (### Header)
           let isHeader = false;
           let cleanLine = line;
-
-          // Match header markdown like: ### Header or ## Header
           const headerMatch = line.match(/^(#{1,6})\s+(.+)$/);
           if (headerMatch) {
             isHeader = true;
             cleanLine = headerMatch[2];
           }
 
-          // Split cleanLine by **bold** parts
+          // 4. Split by bold **text**
           const parts = cleanLine.split(/(\*\*[^*]+\*\*)/g);
 
           return (
             <Text
               key={lineIdx}
-              style={
-                isHeader
-                  ? [
-                      textStyle,
-                      boldStyle,
-                      {
-                        fontSize: 16,
-                        marginTop: lineIdx > 0 ? 8 : 2,
-                        marginBottom: 4,
-                        display: "flex",
-                      },
-                    ]
-                  : undefined
-              }
+              style={[
+                textStyle,
+                {
+                  marginVertical: 1.5,
+                },
+                isHeader && {
+                  fontSize: 15,
+                  fontWeight: "700",
+                  color: isUser ? "#FFF" : "#006FAD",
+                  marginTop: lineIdx > 0 ? 12 : 2,
+                  marginBottom: 6,
+                },
+                !isHeader && trimmed.startsWith("-") && {
+                  paddingLeft: 8,
+                },
+              ]}
             >
               {parts.map((part, partIdx) => {
                 if (part.startsWith("**") && part.endsWith("**")) {
@@ -939,11 +1017,10 @@ export default function KyraAI() {
                 }
                 return part;
               })}
-              {lineIdx < lines.length - 1 ? "\n" : ""}
             </Text>
           );
         })}
-      </Text>
+      </View>
     );
   };
 
@@ -953,41 +1030,48 @@ export default function KyraAI() {
     const dot3 = useRef(new Animated.Value(0)).current;
 
     useEffect(() => {
-      const animateDot = (dot, delay) => {
-        return Animated.sequence([
-          Animated.delay(delay),
-          Animated.loop(
-            Animated.sequence([
-              Animated.timing(dot, {
-                toValue: -6,
-                duration: 250,
-                useNativeDriver: true,
-              }),
-              Animated.timing(dot, {
-                toValue: 0,
-                duration: 250,
-                useNativeDriver: true,
-              }),
-              Animated.timing(dot, {
-                toValue: 0,
-                duration: 500,
-                useNativeDriver: true,
-              }),
-            ])
-          ),
-        ]);
+      const createBounce = (dot) => {
+        return Animated.loop(
+          Animated.sequence([
+            Animated.timing(dot, {
+              toValue: -6,
+              duration: 300,
+              useNativeDriver: true,
+            }),
+            Animated.timing(dot, {
+              toValue: 0,
+              duration: 300,
+              useNativeDriver: true,
+            }),
+            Animated.timing(dot, {
+              toValue: 0,
+              duration: 300,
+              useNativeDriver: true,
+            }),
+          ])
+        );
       };
 
-      const animation = Animated.parallel([
-        animateDot(dot1, 0),
-        animateDot(dot2, 150),
-        animateDot(dot3, 300),
-      ]);
+      const anim1 = createBounce(dot1);
+      const anim2 = createBounce(dot2);
+      const anim3 = createBounce(dot3);
 
-      animation.start();
+      anim1.start();
+      
+      const t1 = setTimeout(() => {
+        anim2.start();
+      }, 150);
+
+      const t2 = setTimeout(() => {
+        anim3.start();
+      }, 300);
 
       return () => {
-        animation.stop();
+        anim1.stop();
+        anim2.stop();
+        anim3.stop();
+        clearTimeout(t1);
+        clearTimeout(t2);
       };
     }, [dot1, dot2, dot3]);
 
@@ -1698,8 +1782,8 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
   aiBubbleContentCompact: {
-    paddingVertical: 6,
-    paddingHorizontal: 12,
+    paddingVertical: 8,
+    paddingHorizontal: 14,
     justifyContent: "center",
     alignItems: "center",
   },
@@ -1707,14 +1791,50 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
-    gap: 3,
-    paddingVertical: 2,
-    paddingHorizontal: 4,
+    gap: 4,
+    paddingVertical: 4,
+    paddingHorizontal: 6,
   },
   threeDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
     backgroundColor: "#006FAD",
+  },
+  labRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    backgroundColor: "#F9FAFB",
+    borderWidth: 1,
+    borderColor: "#E5E7EB",
+    borderRadius: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    marginVertical: 4,
+    alignItems: "center",
+    width: "100%",
+  },
+  labRowLeft: {
+    flex: 1.2,
+    marginRight: 8,
+  },
+  labRowRight: {
+    flex: 1,
+    alignItems: "flex-end",
+  },
+  labParamName: {
+    fontSize: 13,
+    fontWeight: "600",
+    color: "#374151",
+  },
+  labParamValue: {
+    fontSize: 14,
+    fontWeight: "700",
+  },
+  labParamRange: {
+    fontSize: 10,
+    color: "#6B7280",
+    marginTop: 2,
+    textAlign: "right",
   },
 });
