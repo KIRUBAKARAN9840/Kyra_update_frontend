@@ -1024,14 +1024,12 @@ export default function KyraAI() {
               {item.text && renderMessageText(item.text, true)}
             </LinearGradient>
           ) : (
-            <View style={styles.aiBubbleContent}>
+            <View style={item.text ? styles.aiBubbleContent : styles.aiBubbleContentCompact}>
               {renderAttachments(item.documents, false)}
               {item.text ? (
                 renderMessageText(item.text, false)
               ) : (
-                <View style={styles.streamingLoaderWrapper}>
-                  <ThreeDotLoader />
-                </View>
+                <ThreeDotLoader />
               )}
             </View>
           )}
@@ -1699,25 +1697,24 @@ const styles = StyleSheet.create({
     color: "#666",
     marginTop: 2,
   },
-  streamingLoaderWrapper: {
-    padding: 6,
+  aiBubbleContentCompact: {
+    paddingVertical: 6,
+    paddingHorizontal: 12,
     justifyContent: "center",
     alignItems: "center",
-    minWidth: 40,
-    minHeight: 24,
   },
   threeDotContainer: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    gap: 4,
+    gap: 3,
+    paddingVertical: 2,
+    paddingHorizontal: 4,
   },
   threeDot: {
-    width: 7,
-    height: 7,
-    borderRadius: 3.5,
+    width: 6,
+    height: 6,
+    borderRadius: 3,
     backgroundColor: "#006FAD",
   },
 });
