@@ -193,6 +193,16 @@ const chatbotAPI = {
     });
     return res?.data;
   },
+  fetchHistory: async (user_id, offset = 0, limit = 20) => {
+    const res = await axiosInstance.get(`/api/v2/chatbot/chat/history`, {
+      params: {
+        user_id,
+        offset,
+        limit,
+      },
+    });
+    return res?.data;
+  },
 };
 
 export default function KyraAI() {
@@ -239,9 +249,16 @@ export default function KyraAI() {
   const [aiConsentGiven, setAiConsentGiven] = useState(false);
   const [showAIConsentModal, setShowAIConsentModal] = useState(false);
 
+  // Pagination states
+  const [historyOffset, setHistoryOffset] = useState(0);
+  const [hasMoreHistory, setHasMoreHistory] = useState(true);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+
   const flatListRef = useRef(null);
   const esRef = useRef(null);
   const durationInterval = useRef(null);
+  const shouldScrollToBottomRef = useRef(true);
+  const isLoadingHistoryRef = useRef(false);
 
   // Audio Recorder hook from expo-audio
   const audioRecorder = useAudioRecorder({
@@ -265,6 +282,64 @@ export default function KyraAI() {
     }, []),
   );
 
+  const mapHistoryRowToMessages = (row) => {
+    const userMsgId = `user-${row.id}`;
+    const aiMsgId = `ai-${row.id}`;
+    const timestamp = row.created_at ? new Date(row.created_at) : new Date();
+
+    const userMsg = {
+      id: userMsgId,
+      text: row.request,
+      isUser: true,
+      timestamp: timestamp,
+      isComplete: true,
+      isDocument: row.documents && row.documents.length > 0,
+      documents: row.documents || [],
+    };
+
+    const aiMsg = {
+      id: aiMsgId,
+      text: row.response,
+      isUser: false,
+      timestamp: timestamp,
+      isComplete: true,
+    };
+
+    // For inverted FlatList: AI message is newest in a turn (rendered below/closer to index 0),
+    // User message is older in a turn (rendered above/closer to index length).
+    return [aiMsg, userMsg];
+  };
+
+  const loadOlderMessages = async () => {
+    if (isLoadingHistoryRef.current || !hasMoreHistory || !clientId) return;
+
+    isLoadingHistoryRef.current = true;
+    setIsLoadingHistory(true);
+    shouldScrollToBottomRef.current = false; // Prevent auto-scrolling when older items append
+    try {
+      const historyData = await chatbotAPI.fetchHistory(clientId, historyOffset, 20);
+      if (historyData && historyData.messages && historyData.messages.length > 0) {
+        const loadedMessages = [];
+        historyData.messages.forEach((row) => {
+          const msgs = mapHistoryRowToMessages(row);
+          loadedMessages.push(...msgs);
+        });
+
+        // For inverted FlatList, older messages are appended to the end of the array (rendered at the top of list)
+        setMessages((prev) => [...prev, ...loadedMessages]);
+        setHistoryOffset((prev) => prev + historyData.messages.length);
+        setHasMoreHistory(historyData.has_more);
+      } else {
+        setHasMoreHistory(false);
+      }
+    } catch (err) {
+      console.error("Error loading older messages:", err);
+    } finally {
+      setIsLoadingHistory(false);
+      isLoadingHistoryRef.current = false;
+    }
+  };
+
   const getClientId = async () => {
     try {
       const id = await AsyncStorage.getItem("client_id");
@@ -272,15 +347,52 @@ export default function KyraAI() {
       const name = await AsyncStorage.getItem("user_name");
       if (name) setUserName(name);
 
-      setMessages([
-        {
-          id: "welcome",
-          text: `Hey ${name || "there"}! 👋\nYou can chat or use voice messages to ask me anything about your fitness journey.`,
-          isUser: false,
-          timestamp: new Date(),
-          isComplete: true,
-        },
-      ]);
+      if (id) {
+        isLoadingHistoryRef.current = true;
+        setIsLoadingHistory(true);
+        shouldScrollToBottomRef.current = true;
+        try {
+          const historyData = await chatbotAPI.fetchHistory(id, 0, 20);
+          if (historyData && historyData.messages && historyData.messages.length > 0) {
+            const loadedMessages = [];
+            historyData.messages.forEach((row) => {
+              const msgs = mapHistoryRowToMessages(row);
+              loadedMessages.push(...msgs);
+            });
+            setMessages(loadedMessages);
+            setHistoryOffset(historyData.messages.length);
+            setHasMoreHistory(historyData.has_more);
+          } else {
+            // Display welcome message if no history exists
+            setMessages([
+              {
+                id: "welcome",
+                text: `Hey ${name || "there"}! 👋\nYou can chat or use voice messages to ask me anything about your fitness journey.`,
+                isUser: false,
+                timestamp: new Date(),
+                isComplete: true,
+              },
+            ]);
+            setHasMoreHistory(false);
+          }
+        } catch (err) {
+          console.error("Error loading initial chat history:", err);
+          // Fallback to welcome message on error
+          setMessages([
+            {
+              id: "welcome",
+              text: `Hey ${name || "there"}! 👋\nYou can chat or use voice messages to ask me anything about your fitness journey.`,
+              isUser: false,
+              timestamp: new Date(),
+              isComplete: true,
+            },
+          ]);
+          setHasMoreHistory(false);
+        } finally {
+          setIsLoadingHistory(false);
+          isLoadingHistoryRef.current = false;
+        }
+      }
     } catch (err) {
       console.error("Error fetching client_id:", err);
     }
@@ -428,6 +540,8 @@ export default function KyraAI() {
           isComplete: true,
         },
       ]);
+      setHistoryOffset(0);
+      setHasMoreHistory(false);
     } catch (err) {
       console.error("Failed to clear chat history:", err);
     }
@@ -524,8 +638,8 @@ export default function KyraAI() {
 
   const handleVoiceMessage = async (audioUri) => {
     const voiceId = `voice-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    shouldScrollToBottomRef.current = true;
     setMessages((prev) => [
-      ...prev,
       {
         id: voiceId,
         text: "Voice message",
@@ -535,7 +649,11 @@ export default function KyraAI() {
         isVoice: true,
         duration: recordingDuration,
       },
+      ...prev,
     ]);
+    setTimeout(() => {
+      flatListRef.current?.scrollToIndex({ index: 0, animated: true });
+    }, 50);
     setRecordingDuration(0);
     setIsThinking(true);
 
@@ -556,7 +674,6 @@ export default function KyraAI() {
       setIsTyping(false);
       safeCloseSSE();
       setMessages((prev) => [
-        ...prev,
         {
           id: `err-voice-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
           text: "Sorry, I'm having trouble processing your voice message. Please try again.",
@@ -565,6 +682,7 @@ export default function KyraAI() {
           isComplete: true,
           isError: true,
         },
+        ...prev,
       ]);
     }
   };
@@ -681,8 +799,8 @@ export default function KyraAI() {
     const aiId = `ai-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     setCurrentMessageId(aiId);
 
+    shouldScrollToBottomRef.current = true;
     setMessages((prev) => [
-      ...prev,
       {
         id: aiId,
         text: "",
@@ -691,6 +809,7 @@ export default function KyraAI() {
         isComplete: false,
         isStreaming: true,
       },
+      ...prev,
     ]);
 
     safeCloseSSE();
@@ -731,7 +850,7 @@ export default function KyraAI() {
       );
 
       setTimeout(() => {
-        flatListRef.current?.scrollToEnd({ animated: true });
+        flatListRef.current?.scrollToIndex({ index: 0, animated: true });
       }, 50);
     };
 
@@ -760,7 +879,6 @@ export default function KyraAI() {
       es.addEventListener("error", () => {
         finalize();
         setMessages((prev) => [
-          ...prev,
           {
             id: `err-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
             text: "Connection dropped. Please ask again if Kyra's response was cut short.",
@@ -769,13 +887,13 @@ export default function KyraAI() {
             isComplete: true,
             isError: true,
           },
+          ...prev,
         ]);
       });
     } catch (error) {
       console.error("SSE Connection error:", error);
       setIsTyping(false);
       setMessages((prev) => [
-        ...prev,
         {
           id: `err-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
           text: "Failed to connect to Fittbot servers. Please try again.",
@@ -784,6 +902,7 @@ export default function KyraAI() {
           isComplete: true,
           isError: true,
         },
+        ...prev,
       ]);
     }
   };
@@ -801,8 +920,8 @@ export default function KyraAI() {
     const attachments = currentImage && currentImage.attachment ? [currentImage.attachment] : [];
     const messageText = txt || (currentImage ? `Sent image: ${currentImage.name}` : "");
 
+    shouldScrollToBottomRef.current = true;
     setMessages((prev) => [
-      ...prev,
       {
         id: msgId,
         text: messageText,
@@ -812,7 +931,11 @@ export default function KyraAI() {
         isDocument: !!currentImage,
         documents: attachments,
       },
+      ...prev,
     ]);
+    setTimeout(() => {
+      flatListRef.current?.scrollToIndex({ index: 0, animated: true });
+    }, 50);
     setIsThinking(true);
 
     try {
@@ -1024,65 +1147,6 @@ export default function KyraAI() {
     );
   };
 
-  const ThreeDotLoader = () => {
-    const dot1 = useRef(new Animated.Value(0)).current;
-    const dot2 = useRef(new Animated.Value(0)).current;
-    const dot3 = useRef(new Animated.Value(0)).current;
-
-    useEffect(() => {
-      const createBounce = (dot) => {
-        return Animated.loop(
-          Animated.sequence([
-            Animated.timing(dot, {
-              toValue: -6,
-              duration: 300,
-              useNativeDriver: true,
-            }),
-            Animated.timing(dot, {
-              toValue: 0,
-              duration: 300,
-              useNativeDriver: true,
-            }),
-            Animated.timing(dot, {
-              toValue: 0,
-              duration: 300,
-              useNativeDriver: true,
-            }),
-          ])
-        );
-      };
-
-      const anim1 = createBounce(dot1);
-      const anim2 = createBounce(dot2);
-      const anim3 = createBounce(dot3);
-
-      anim1.start();
-      
-      const t1 = setTimeout(() => {
-        anim2.start();
-      }, 150);
-
-      const t2 = setTimeout(() => {
-        anim3.start();
-      }, 300);
-
-      return () => {
-        anim1.stop();
-        anim2.stop();
-        anim3.stop();
-        clearTimeout(t1);
-        clearTimeout(t2);
-      };
-    }, [dot1, dot2, dot3]);
-
-    return (
-      <View style={styles.threeDotContainer}>
-        <Animated.View style={[styles.threeDot, { transform: [{ translateY: dot1 }] }]} />
-        <Animated.View style={[styles.threeDot, { transform: [{ translateY: dot2 }] }]} />
-        <Animated.View style={[styles.threeDot, { transform: [{ translateY: dot3 }] }]} />
-      </View>
-    );
-  };
 
   const renderMessage = ({ item }) => {
     const isUser = item.isUser;
@@ -1217,23 +1281,31 @@ export default function KyraAI() {
         <FlatList
           ref={flatListRef}
           data={messages}
+          inverted={true}
           keyExtractor={(item, index) => `${item.id}-${index}`}
           renderItem={renderMessage}
           style={styles.messagesList}
           contentContainerStyle={styles.messagesContent}
-          onContentSizeChange={() => flatListRef.current?.scrollToEnd({ animated: true })}
-          onLayout={() => {
-            if (messages && messages.length > 0) {
-              flatListRef.current?.scrollToEnd({ animated: true });
-            }
-          }}
+
           showsVerticalScrollIndicator={false}
-          ListFooterComponent={() => (
+          onEndReached={loadOlderMessages}
+          onEndReachedThreshold={0.1}
+          ListHeaderComponent={() => (
             <>
               {renderThinkingIndicator()}
               {renderCompactTypingIndicator()}
             </>
           )}
+          ListFooterComponent={() => {
+            if (isLoadingHistory && messages.length > 0) {
+              return (
+                <View style={{ paddingVertical: 12, alignItems: "center" }}>
+                  <ActivityIndicator size="small" color="#006FAD" />
+                </View>
+              );
+            }
+            return null;
+          }}
         />
 
         {/* Input box */}
@@ -1419,7 +1491,7 @@ export default function KyraAI() {
         </SafeAreaView>
       </KeyboardAvoidingView>
 
-      {/* AI Consent Modal */}
+      {/* AI Consent Modal
       <Modal
         visible={showAIConsentModal}
         transparent={true}
@@ -1452,9 +1524,90 @@ export default function KyraAI() {
           </View>
         </View>
       </Modal>
+      */}
     </View>
   );
 }
+
+const ThreeDotLoader = () => {
+  const dot1 = useRef(new Animated.Value(0)).current;
+  const dot2 = useRef(new Animated.Value(0)).current;
+  const dot3 = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const animate = () => {
+      if (!isMounted) return;
+
+      dot1.setValue(0);
+      dot2.setValue(0);
+      dot3.setValue(0);
+
+      Animated.parallel([
+        Animated.sequence([
+          Animated.timing(dot1, {
+            toValue: -6,
+            duration: 300,
+            useNativeDriver: true,
+          }),
+          Animated.timing(dot1, {
+            toValue: 0,
+            duration: 300,
+            useNativeDriver: true,
+          }),
+        ]),
+        Animated.sequence([
+          Animated.delay(150),
+          Animated.timing(dot2, {
+            toValue: -6,
+            duration: 300,
+            useNativeDriver: true,
+          }),
+          Animated.timing(dot2, {
+            toValue: 0,
+            duration: 300,
+            useNativeDriver: true,
+          }),
+        ]),
+        Animated.sequence([
+          Animated.delay(300),
+          Animated.timing(dot3, {
+            toValue: -6,
+            duration: 300,
+            useNativeDriver: true,
+          }),
+          Animated.timing(dot3, {
+            toValue: 0,
+            duration: 300,
+            useNativeDriver: true,
+          }),
+        ]),
+      ]).start(() => {
+        if (isMounted) {
+          animate();
+        }
+      });
+    };
+
+    animate();
+
+    return () => {
+      isMounted = false;
+      dot1.stopAnimation();
+      dot2.stopAnimation();
+      dot3.stopAnimation();
+    };
+  }, []);
+
+  return (
+    <View style={styles.threeDotContainer}>
+      <Animated.View style={[styles.threeDot, { transform: [{ translateY: dot1 }] }]} />
+      <Animated.View style={[styles.threeDot, { transform: [{ translateY: dot2 }] }]} />
+      <Animated.View style={[styles.threeDot, { transform: [{ translateY: dot3 }] }]} />
+    </View>
+  );
+};
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: "#FFFFFF" },
