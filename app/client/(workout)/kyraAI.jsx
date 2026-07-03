@@ -203,6 +203,14 @@ const chatbotAPI = {
     });
     return res?.data;
   },
+  fetchDailyGreeting: async (user_id) => {
+    const res = await axiosInstance.post(`/api/v2/chatbot/chat/daily-greeting`, null, {
+      params: {
+        user_id,
+      },
+    });
+    return res?.data;
+  },
 };
 
 export default function KyraAI() {
@@ -259,6 +267,7 @@ export default function KyraAI() {
   const durationInterval = useRef(null);
   const shouldScrollToBottomRef = useRef(true);
   const isLoadingHistoryRef = useRef(false);
+  const inputRef = useRef(null);
 
   // Audio Recorder hook from expo-audio
   const audioRecorder = useAudioRecorder({
@@ -304,6 +313,11 @@ export default function KyraAI() {
       timestamp: timestamp,
       isComplete: true,
     };
+
+    // If it's a system daily greeting, skip showing the fake user request bubble
+    if (row.request === "[system_greeting]") {
+      return [aiMsg];
+    }
 
     // For inverted FlatList: AI message is newest in a turn (rendered below/closer to index 0),
     // User message is older in a turn (rendered above/closer to index length).
@@ -353,18 +367,15 @@ export default function KyraAI() {
         shouldScrollToBottomRef.current = true;
         try {
           const historyData = await chatbotAPI.fetchHistory(id, 0, 20);
+          let initialMessages = [];
           if (historyData && historyData.messages && historyData.messages.length > 0) {
-            const loadedMessages = [];
             historyData.messages.forEach((row) => {
               const msgs = mapHistoryRowToMessages(row);
-              loadedMessages.push(...msgs);
+              initialMessages.push(...msgs);
             });
-            setMessages(loadedMessages);
-            setHistoryOffset(historyData.messages.length);
-            setHasMoreHistory(historyData.has_more);
-          } else {
-            // Display welcome message if no history exists
-            setMessages([
+          } else if (!historyData.generate_greeting) {
+            // Display welcome message if no history exists and no greeting is to be generated
+            initialMessages = [
               {
                 id: "welcome",
                 text: `Hey ${name || "there"}! 👋\nYou can chat or use voice messages to ask me anything about your fitness journey.`,
@@ -372,8 +383,41 @@ export default function KyraAI() {
                 timestamp: new Date(),
                 isComplete: true,
               },
-            ]);
-            setHasMoreHistory(false);
+            ];
+          }
+
+          setMessages(initialMessages);
+          setHistoryOffset(historyData.messages ? historyData.messages.length : 0);
+          setHasMoreHistory(historyData.has_more);
+
+          if (historyData.generate_greeting) {
+            setIsThinking(true);
+            try {
+              const greetingData = await chatbotAPI.fetchDailyGreeting(id);
+              if (greetingData) {
+                const msgs = mapHistoryRowToMessages(greetingData);
+                setMessages((prev) => [...msgs, ...prev]);
+                setHistoryOffset((prev) => prev + 1);
+                setTimeout(() => {
+                  flatListRef.current?.scrollToIndex({ index: 0, animated: true });
+                }, 100);
+              }
+            } catch (greetErr) {
+              console.error("Error fetching daily greeting:", greetErr);
+              if (initialMessages.length === 0) {
+                setMessages([
+                  {
+                    id: "welcome",
+                    text: `Hey ${name || "there"}! 👋\nYou can chat or use voice messages to ask me anything about your fitness journey.`,
+                    isUser: false,
+                    timestamp: new Date(),
+                    isComplete: true,
+                  },
+                ]);
+              }
+            } finally {
+              setIsThinking(false);
+            }
           }
         } catch (err) {
           console.error("Error loading initial chat history:", err);
@@ -915,6 +959,7 @@ export default function KyraAI() {
     const currentImage = selectedImage;
     setSelectedImage(null);
     setInputText("");
+    inputRef.current?.clear();
 
     const msgId = `user-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     const attachments = currentImage && currentImage.attachment ? [currentImage.attachment] : [];
@@ -1016,8 +1061,11 @@ export default function KyraAI() {
     const textStyle = isUser ? styles.userMessageText : styles.aiMessageText;
     const boldStyle = { fontWeight: "700" };
 
+    // Convert any literal stringified "\\n" escapes to real newlines first
+    const cleanText = text.replace(/\\n/g, "\n");
+
     // Normalize collapsed markdown (AI returns everything on one line)
-    let normalized = text
+    let normalized = cleanText
       // Bold list items: ANY " - **" occurrence means a new list item
       .replace(/ - \*\*/g, "\n- **")
       // Dividers
@@ -1196,9 +1244,10 @@ export default function KyraAI() {
             style={{ width: 24, height: 24 }}
           />
         </View>
-        <View style={styles.thinkingBubble}>
-          <ActivityIndicator size="small" color="#006FAD" />
-          <Text style={styles.thinkingText}>Thinking...</Text>
+        <View style={styles.aiMessageBubble}>
+          <View style={styles.aiBubbleContentCompact}>
+            <ThreeDotLoader />
+          </View>
         </View>
       </View>
     );
@@ -1214,9 +1263,10 @@ export default function KyraAI() {
             style={{ width: 24, height: 24 }}
           />
         </View>
-        <View style={styles.thinkingBubble}>
-          <ActivityIndicator size="small" color="#25ACE5" />
-          <Text style={styles.thinkingText}>Responding...</Text>
+        <View style={styles.aiMessageBubble}>
+          <View style={styles.aiBubbleContentCompact}>
+            <ThreeDotLoader />
+          </View>
         </View>
       </View>
     );
@@ -1404,6 +1454,7 @@ export default function KyraAI() {
               <>
                 <View style={styles.inputWrapper}>
                   <TextInput
+                    ref={inputRef}
                     style={styles.textInput}
                     value={inputText}
                     onChangeText={setInputText}
@@ -1412,6 +1463,9 @@ export default function KyraAI() {
                     multiline
                     maxLength={500}
                     editable={!isRecording}
+                    returnKeyType="send"
+                    onSubmitEditing={sendMessage}
+                    blurOnSubmit={false}
                   />
 
                   {/* Attachment button */}
