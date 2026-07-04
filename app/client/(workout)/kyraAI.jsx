@@ -18,7 +18,7 @@ import {
 import { LinearGradient } from "expo-linear-gradient";
 import { Ionicons, MaterialIcons } from "@expo/vector-icons";
 import { MaskedText } from "../../../components/ui/MaskedText";
-import { useAudioRecorder, useAudioRecorderState, AudioModule, RecordingPresets, setAudioModeAsync } from "expo-audio";
+import { useAudioRecorder, useAudioRecorderState, AudioModule, RecordingPresets, setAudioModeAsync, useAudioPlayer } from "expo-audio";
 import axios from "axios";
 import axiosInstance from "../../../services/axiosInstance";
 import * as SecureStore from "expo-secure-store";
@@ -213,6 +213,95 @@ const chatbotAPI = {
   },
 };
 
+const VoiceMessagePlayer = ({ uri, durationSecs, transcript }) => {
+  const player = useAudioPlayer(uri ? { uri } : null);
+  const [showTranscript, setShowTranscript] = useState(false);
+  const [currentTimeMs, setCurrentTimeMs] = useState(0);
+
+  useEffect(() => {
+    let interval;
+    if (player && player.playing) {
+      interval = setInterval(() => {
+        setCurrentTimeMs((player.currentTime || 0) * 1000);
+      }, 100);
+    } else if (player) {
+      setCurrentTimeMs((player.currentTime || 0) * 1000);
+    }
+    return () => clearInterval(interval);
+  }, [player?.playing, player?.currentTime]);
+
+  if (!player) return null;
+
+  const handlePlayPause = () => {
+    if (player.playing) {
+      player.pause();
+    } else {
+      if (player.currentTime >= player.duration) {
+        player.seekTo(0);
+      }
+      player.play();
+    }
+  };
+
+  const formatTime = (secs) => {
+    if (isNaN(secs) || secs === null || secs === undefined) return "0:00";
+    const minutes = Math.floor(secs / 60);
+    const seconds = Math.floor(secs % 60);
+    return `${minutes}:${seconds < 10 ? "0" : ""}${seconds}`;
+  };
+
+  const totalDuration = player.duration > 0 ? player.duration : durationSecs || 0;
+  const currentPos = player.currentTime || 0;
+  const progress = totalDuration > 0 ? currentPos / totalDuration : 0;
+
+  return (
+    <View style={styles.voicePlayerCard}>
+      <View style={styles.voicePlayerRow}>
+        <TouchableOpacity style={styles.voicePlayButton} onPress={handlePlayPause}>
+          <Ionicons
+            name={player.playing ? "pause" : "play"}
+            size={18}
+            color="#006FAD"
+          />
+        </TouchableOpacity>
+
+        <View style={styles.voiceProgressWrapper}>
+          <View style={styles.voiceProgressBarBg}>
+            <View style={[styles.voiceProgressBarFill, { width: `${Math.min(100, progress * 100)}%` }]} />
+          </View>
+          
+          <View style={styles.voiceTimeLabelsRow}>
+            <Text style={styles.voiceTimeLabel}>{formatTime(currentPos)}</Text>
+            <Text style={styles.voiceTimeLabel}>{formatTime(totalDuration)}</Text>
+          </View>
+        </View>
+      </View>
+
+      {/* transcript && transcript !== "Voice message" && (
+        <View style={styles.voiceTranscriptWrapper}>
+          <TouchableOpacity 
+            style={styles.voiceTranscriptToggle} 
+            onPress={() => setShowTranscript(!showTranscript)}
+          >
+            <Text style={styles.voiceTranscriptToggleText}>
+              {showTranscript ? "Hide Transcript" : "Show Transcript"}
+            </Text>
+            <Ionicons 
+              name={showTranscript ? "chevron-up" : "chevron-down"} 
+              size={12} 
+              color="#FFF" 
+            />
+          </TouchableOpacity>
+          {showTranscript && (
+            <Text style={styles.voiceTranscriptText}>{transcript}</Text>
+          )}
+        </View>
+      ) */}
+    </View>
+  );
+};
+
+
 export default function KyraAI() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
@@ -296,13 +385,15 @@ export default function KyraAI() {
     const aiMsgId = `ai-${row.id}`;
     const timestamp = row.created_at ? new Date(row.created_at) : new Date();
 
+    const isAudioMsg = row.request_type === "audio" || (row.documents && row.documents.some(d => d.mime_type.startsWith("audio/")));
     const userMsg = {
       id: userMsgId,
       text: row.request,
       isUser: true,
       timestamp: timestamp,
       isComplete: true,
-      isDocument: row.documents && row.documents.length > 0,
+      isDocument: row.documents && row.documents.length > 0 && !isAudioMsg,
+      isVoice: isAudioMsg,
       documents: row.documents || [],
     };
 
@@ -492,12 +583,12 @@ export default function KyraAI() {
             Animated.timing(val, {
               toValue: Math.random() * 0.8 + 0.2,
               duration: 150 + Math.random() * 150,
-              useNativeDriver: false,
+              useNativeDriver: true,
             }),
             Animated.timing(val, {
               toValue: Math.random() * 0.4 + 0.1,
               duration: 150 + Math.random() * 150,
-              useNativeDriver: false,
+              useNativeDriver: true,
             }),
           ])
         );
@@ -682,6 +773,10 @@ export default function KyraAI() {
 
   const handleVoiceMessage = async (audioUri) => {
     const voiceId = `voice-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const extension = Platform.OS === "ios" ? "m4a" : "mp4";
+    const mimeType = Platform.OS === "ios" ? "audio/m4a" : "audio/mp4";
+    const fileName = `voice_message_${Date.now()}.${extension}`;
+
     shouldScrollToBottomRef.current = true;
     setMessages((prev) => [
       {
@@ -692,26 +787,76 @@ export default function KyraAI() {
         isComplete: true,
         isVoice: true,
         duration: recordingDuration,
+        documents: [],
       },
       ...prev,
     ]);
     setTimeout(() => {
       flatListRef.current?.scrollToIndex({ index: 0, animated: true });
     }, 50);
+
+    const savedDuration = recordingDuration;
     setRecordingDuration(0);
     setIsThinking(true);
 
     try {
-      const transcript = await chatbotAPI.transcribeVoice(audioUri, clientId);
-      if (!transcript) throw new Error("Empty transcript");
+      // 1. Get file size
+      const fileInfo = await FileSystem.getInfoAsync(audioUri);
+      const size = fileInfo.exists ? fileInfo.size : 0;
 
+      // 2. Fetch presigned upload URL and transcribe in parallel
+      const [uploadResponse, transcript] = await Promise.all([
+        chatbotAPI.getUploadUrl(clientId, fileName, mimeType),
+        chatbotAPI.transcribeVoice(audioUri, clientId).catch((err) => {
+          console.error("Transcription error (continuing with upload):", err);
+          return "Voice message";
+        }),
+      ]);
+
+      if (!uploadResponse || !uploadResponse.success) {
+        throw new Error("Failed to get presigned upload URL for voice message");
+      }
+
+      const { upload, cdn_url, key } = uploadResponse.data;
+
+      // 3. Upload to S3
+      const uploadResult = await FileSystem.uploadAsync(upload.url, audioUri, {
+        httpMethod: "POST",
+        uploadType: FileSystem.FileSystemUploadType?.MULTIPART ?? 1,
+        fieldName: "file",
+        mimeType: mimeType,
+        parameters: upload.fields,
+      });
+
+      if (uploadResult.status !== 200 && uploadResult.status !== 204) {
+        throw new Error(`Voice upload failed with status ${uploadResult.status}`);
+      }
+
+      // 4. Build attachment object
+      const attachment = {
+        file_name: fileName,
+        file_size: size,
+        mime_type: mimeType,
+        s3_key: key,
+        s3_url: cdn_url,
+      };
+
+      // 5. Update local message details
       setMessages((prev) =>
         prev.map((m) =>
-          m.id === voiceId ? { ...m, text: transcript } : m,
+          m.id === voiceId
+            ? {
+                ...m,
+                text: transcript || "Voice message",
+                documents: [attachment],
+              }
+            : m,
         ),
       );
 
-      await sendStreamingMessage(transcript, "audio");
+      // 6. Send message to backend
+      await sendStreamingMessage(transcript || "Voice message", "audio", [attachment]);
+
     } catch (err) {
       console.error("Voice processing error:", err);
       setIsThinking(false);
@@ -1216,8 +1361,18 @@ export default function KyraAI() {
               end={{ x: 1, y: 0 }}
               style={styles.userBubbleContent}
             >
-              {renderAttachments(item.documents, true)}
-              {item.text && renderMessageText(item.text, true)}
+              {item.isVoice ? (
+                <VoiceMessagePlayer 
+                  uri={item.documents?.[0]?.s3_url || item.uri} 
+                  durationSecs={item.duration}
+                  transcript={item.text} 
+                />
+              ) : (
+                <>
+                  {renderAttachments(item.documents, true)}
+                  {item.text && renderMessageText(item.text, true)}
+                </>
+              )}
             </LinearGradient>
           ) : (
             <View style={item.text ? styles.aiBubbleContent : styles.aiBubbleContentCompact}>
@@ -1418,10 +1573,7 @@ export default function KyraAI() {
                         style={[
                           styles.waveBar,
                           {
-                            height: anim.interpolate({
-                              inputRange: [0, 1],
-                              outputRange: [4, 20],
-                            }),
+                            transform: [{ scaleY: anim }],
                           },
                         ]}
                       />
@@ -1812,11 +1964,78 @@ const styles = StyleSheet.create({
   },
   waveBar: {
     width: 3,
+    height: 20,
     borderRadius: 1.5,
     backgroundColor: "#006FAD",
   },
   recordingCancelBtn: {
     padding: 4,
+  },
+  voicePlayerCard: {
+    paddingVertical: 6,
+    paddingHorizontal: 0,
+    backgroundColor: "transparent",
+    width: width * 0.55,
+  },
+  voicePlayerRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+  voicePlayButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: "#FFF",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  voiceProgressWrapper: {
+    flex: 1,
+    justifyContent: "center",
+  },
+  voiceProgressBarBg: {
+    height: 3,
+    backgroundColor: "rgba(255, 255, 255, 0.3)",
+    borderRadius: 1.5,
+    width: "100%",
+    marginBottom: 4,
+  },
+  voiceProgressBarFill: {
+    height: 3,
+    backgroundColor: "#FFF",
+    borderRadius: 1.5,
+  },
+  voiceTimeLabelsRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+  },
+  voiceTimeLabel: {
+    fontSize: 9,
+    color: "rgba(255, 255, 255, 0.8)",
+  },
+  voiceTranscriptWrapper: {
+    marginTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: "rgba(255, 255, 255, 0.15)",
+    paddingTop: 8,
+  },
+  voiceTranscriptToggle: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+  },
+  voiceTranscriptToggleText: {
+    fontSize: 11,
+    fontWeight: "600",
+    color: "#FFF",
+  },
+  voiceTranscriptText: {
+    fontSize: 13,
+    color: "#FFF",
+    marginTop: 6,
+    lineHeight: 18,
+    fontStyle: "italic",
   },
 
   modalOverlay: {
