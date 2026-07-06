@@ -15,7 +15,7 @@ import {
   Ionicons,
 } from "@expo/vector-icons";
 import { Image } from "expo-image";
-import { useRouter } from "expo-router";
+import { useRouter, useLocalSearchParams } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import useGuardNav from "../../../hooks/useGuardNav";
 
@@ -108,10 +108,43 @@ const ClassIcon = ({ icon, color, size = 24 }) => {
   return <IconComponent name={icon.name} size={size} color={color} />;
 };
 
+const CATEGORY_MAP = {
+  zumba: { id: 4, name: "Zumba" },
+  pilates: { id: 9, name: "Pilates" },
+  yoga: { id: 3, name: "Yoga" },
+  dance: { id: 12, name: "Dance" },
+  aerobic: { id: 6, name: "Aerobic" },
+  aerobics: { id: 6, name: "Aerobic" },
+  karate: { id: 15, name: "Martial Arts" },
+  "martial arts": { id: 15, name: "Martial Arts" },
+  boxing: { id: 5, name: "Boxing" },
+  swimming: { id: 13, name: "Swimming" },
+  gymnastics: { id: 16, name: "Gymnastics" },
+};
+
 const AllClass = () => {
   const router = useRouter();
+  const { category } = useLocalSearchParams();
   const insets = useSafeAreaInsets();
   const guardNav = useGuardNav();
+
+  useEffect(() => {
+    if (category) {
+      const lower = category.trim().toLowerCase();
+      const mapped = CATEGORY_MAP[lower];
+      if (mapped) {
+        guardNav(() =>
+          router.replace({
+            pathname: "/client/(fitnessclass)/listclass",
+            params: {
+              session_id: mapped.id,
+              session_name: mapped.name,
+            },
+          })
+        );
+      }
+    }
+  }, [category]);
 
   useEffect(() => {
     const backHandler = BackHandler.addEventListener(

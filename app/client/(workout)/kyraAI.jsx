@@ -14,6 +14,8 @@ import {
   Modal,
   Keyboard,
   Linking,
+  ImageBackground,
+  ScrollView,
 } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
 import { Ionicons, MaterialIcons } from "@expo/vector-icons";
@@ -32,7 +34,9 @@ import {
   closeChatbotAPI,
   getAIConsentAPI,
   postAIConsentAPI,
+  getSessionsGymsAPI,
 } from "../../../services/clientApi";
+import { getCachedLocation } from "../../../services/locationCache";
 import { useChatSound } from "../../../hooks/useChatSound";
 import apiConfig from "../../../services/apiConfig";
 import { useSafeAreaInsets, SafeAreaView } from "react-native-safe-area-context";
@@ -213,6 +217,212 @@ const chatbotAPI = {
   },
 };
 
+const SESSION_IMAGES = {
+  Aerobic: require("../../../assets/images/home_content/aerobics.webp"),
+  Boxing: require("../../../assets/images/home_content/boxing.webp"),
+  Dance: require("../../../assets/images/home_content/dance.webp"),
+  Gymnastics: require("../../../assets/images/home_content/gymnastics.webp"),
+  "Martial Arts": require("../../../assets/images/home_content/martial_arts.webp"),
+  "Personal Trainer": require("../../../assets/images/home_content/personal_trainer.webp"),
+  Pilates: require("../../../assets/images/home_content/pilates.webp"),
+  Swimming: require("../../../assets/images/home_content/swimming.webp"),
+  Yoga: require("../../../assets/images/home_content/yoga.webp"),
+  Zumba: require("../../../assets/images/home_content/zumba.webp"),
+};
+const DEFAULT_SESSION_IMAGE = require("../../../assets/images/home_content/aerobics.webp");
+
+const CATEGORY_MAP = {
+  zumba: { id: 4, name: "Zumba" },
+  pilates: { id: 9, name: "Pilates" },
+  yoga: { id: 3, name: "Yoga" },
+  dance: { id: 12, name: "Dance" },
+  aerobic: { id: 6, name: "Aerobic" },
+  aerobics: { id: 6, name: "Aerobic" },
+  karate: { id: 15, name: "Martial Arts" },
+  "martial arts": { id: 15, name: "Martial Arts" },
+  boxing: { id: 5, name: "Boxing" },
+  swimming: { id: 13, name: "Swimming" },
+  gymnastics: { id: 16, name: "Gymnastics" },
+};
+
+const NearbyClassesCarousel = React.memo(({ category, sessionsData, onSaveData }) => {
+  const router = useRouter();
+  const [loading, setLoading] = useState(!sessionsData);
+  const [sessions, setSessions] = useState(sessionsData || []);
+
+  useEffect(() => {
+    if (sessionsData && sessionsData.length > 0) {
+      setSessions(sessionsData);
+      setLoading(false);
+      return;
+    }
+
+    let active = true;
+    const loadNearby = async () => {
+      try {
+        setLoading(true);
+        const lower = category?.trim().toLowerCase() || "all";
+        const mapped = CATEGORY_MAP[lower] || CATEGORY_MAP["yoga"];
+
+        const coords = await getCachedLocation().catch(() => null);
+
+        const today = new Date();
+        const istOffset = 330 * 60 * 1000;
+        const todayIST = new Date(today.getTime() + istOffset);
+        const dateStr = todayIST.toISOString().split("T")[0];
+
+        const params = {
+          session_id: mapped.id,
+          dates: [dateStr],
+          page: 1,
+          limit: 10,
+        };
+        if (coords) {
+          params.client_lat = coords.lat;
+          params.client_lng = coords.lng;
+        }
+
+        const res = await getSessionsGymsAPI(params);
+        if (res && res.status === 200 && active) {
+          const list = (res.data || [])
+            .map((gym) => ({
+              ...gym,
+              distance_km: gym.distance_km != null ? Number(gym.distance_km) : null,
+            }))
+            .filter((gym) => gym.distance_km === null || gym.distance_km <= 10.0);
+          setSessions(list);
+          if (onSaveData) {
+            onSaveData(list);
+          }
+        }
+      } catch (err) {
+        console.error("NearbyClassesCarousel fetch error:", err);
+      } finally {
+        if (active) setLoading(false);
+      }
+    };
+
+    loadNearby();
+    return () => {
+      active = false;
+    };
+  }, [category, sessionsData]);
+
+  if (loading) {
+    return (
+      <View style={{ padding: 12, alignItems: "center" }}>
+        <ActivityIndicator size="small" color="#006FAD" />
+      </View>
+    );
+  }
+
+  if (sessions.length === 0) {
+    return (
+      <View style={{ padding: 8, paddingHorizontal: 12 }}>
+        <Text style={{ fontSize: 11, color: "rgba(255,255,255,0.7)", fontStyle: "italic" }}>
+          No classes found within 10 km today.
+        </Text>
+      </View>
+    );
+  }
+
+  const lower = category?.trim().toLowerCase() || "all";
+  const mapped = CATEGORY_MAP[lower] || CATEGORY_MAP["yoga"];
+
+  return (
+    <View style={styles.carouselContainer}>
+      <Text style={styles.carouselTitle}>Nearby {mapped.name} Classes</Text>
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={{ paddingRight: 16 }}
+      >
+        {sessions.map((item) => {
+          const firstSlot = item.slots?.[0];
+          const startStr = firstSlot?.start_time || "N/A";
+
+          return (
+            <TouchableOpacity
+              key={item.gym_id}
+              activeOpacity={0.88}
+              style={styles.nearbyCardShadow}
+              onPress={() => {
+                const today = new Date();
+                const istOffset = 330 * 60 * 1000;
+                const todayIST = new Date(today.getTime() + istOffset);
+                const dateStr = todayIST.toISOString().split("T")[0];
+
+                const params = {
+                  gymId: String(item.gym_id),
+                  gymName: item.gym_name,
+                  sessionId: String(mapped.id),
+                  sessionName: mapped.name,
+                  scheduleId: firstSlot ? String(firstSlot.schedule_id) : "",
+                  slotTime: firstSlot ? `${firstSlot.start_time} - ${firstSlot.end_time}` : "",
+                  selectedDates: JSON.stringify([dateStr]),
+                };
+                router.push({
+                  pathname: "/client/(fitnessclass)/sessionCheckout",
+                  params,
+                });
+              }}
+            >
+              <View style={styles.nearbyCard}>
+                <ImageBackground
+                  source={
+                    item.image && item.image.startsWith("http")
+                      ? { uri: item.image }
+                      : SESSION_IMAGES[mapped.name] || DEFAULT_SESSION_IMAGE
+                  }
+                  style={styles.nearbyCardBg}
+                  imageStyle={{ borderRadius: 14 }}
+                  resizeMode="cover"
+                >
+                  <LinearGradient
+                    colors={["rgba(0,0,0,0.6)", "rgba(0,0,0,0)", "rgba(0,0,0,0.75)"]}
+                    style={StyleSheet.absoluteFillObject}
+                  />
+                  <View style={styles.nearbyCardTop}>
+                    <Text style={styles.nearbyCardTitle} numberOfLines={1}>
+                      {mapped.name}
+                    </Text>
+                    <Text style={styles.nearbyCardGymName} numberOfLines={1}>
+                      {item.gym_name}
+                    </Text>
+                    {item.distance_km !== null && (
+                      <Text style={styles.nearbyCardDistance}>
+                        {item.distance_km.toFixed(1)} km away
+                      </Text>
+                    )}
+                  </View>
+                  <View style={styles.nearbyCardBottom}>
+                    <View>
+                      <Text style={styles.nearbyStartAt}>Start at</Text>
+                      <View style={styles.nearbyTimeRow}>
+                        <Ionicons name="time-outline" size={10} color="#FF8E8E" />
+                        <Text style={styles.nearbyTime} numberOfLines={1}>
+                          {startStr}
+                        </Text>
+                      </View>
+                    </View>
+                    {item.session_price != null && (
+                      <View style={styles.nearbyPricePill}>
+                        <Text style={styles.nearbyPriceText}>
+                          ₹{item.session_price} only
+                        </Text>
+                      </View>
+                    )}
+                  </View>
+                </ImageBackground>
+              </View>
+            </TouchableOpacity>
+          );
+        })}
+      </ScrollView>
+    </View>
+  );
+});
+
 const VoiceMessagePlayer = ({ uri, durationSecs, transcript }) => {
   const player = useAudioPlayer(uri ? { uri } : null);
   const [showTranscript, setShowTranscript] = useState(false);
@@ -341,6 +551,14 @@ export default function KyraAI() {
   const [isThinking, setIsThinking] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
   const [currentMessageId, setCurrentMessageId] = useState(null);
+
+  const saveMessageSessionsData = useCallback((msgId, data) => {
+    setMessages((prev) =>
+      prev.map((msg) =>
+        msg.id === msgId ? { ...msg, sessionsData: data } : msg
+      )
+    );
+  }, []);
 
   // Consent states
   const [aiConsentGiven, setAiConsentGiven] = useState(false);
@@ -1203,14 +1421,27 @@ export default function KyraAI() {
   const renderMessageText = (text, isUser) => {
     if (!text) return null;
 
+    // Parse recommendation tag
+    const recommendRegex = /\[RECOMMEND_CLASS:\s*category="([^"]+)",\s*label="([^"]+)"\]/i;
+    const recommendMatch = text.match(recommendRegex);
+    let recommendation = null;
+    let cleanText = text;
+    if (recommendMatch) {
+      recommendation = {
+        category: recommendMatch[1],
+        label: recommendMatch[2],
+      };
+      cleanText = text.replace(recommendRegex, "").trim();
+    }
+
     const textStyle = isUser ? styles.userMessageText : styles.aiMessageText;
     const boldStyle = { fontWeight: "700" };
 
     // Convert any literal stringified "\\n" escapes to real newlines first
-    const cleanText = text.replace(/\\n/g, "\n");
+    const cleanEscapes = cleanText.replace(/\\n/g, "\n");
 
     // Normalize collapsed markdown (AI returns everything on one line)
-    let normalized = cleanText
+    let normalized = cleanEscapes
       // Bold list items: ANY " - **" occurrence means a new list item
       .replace(/ - \*\*/g, "\n- **")
       // Dividers
@@ -1336,6 +1567,38 @@ export default function KyraAI() {
             </Text>
           );
         })}
+
+        {recommendation && (
+          <TouchableOpacity
+            style={[
+              styles.recommendButton,
+              isUser ? styles.userRecommendButton : styles.aiRecommendButton
+            ]}
+            onPress={() => {
+              router.push({
+                pathname: "/client/(fitnessclass)/allclass",
+                params: { category: recommendation.category },
+              });
+            }}
+          >
+            <Ionicons 
+              name="compass-outline" 
+              size={15} 
+              color={isUser ? "#006FAD" : "#FFF"} 
+            />
+            <Text style={[
+              styles.recommendButtonText, 
+              isUser ? styles.userRecommendButtonText : styles.aiRecommendButtonText
+            ]}>
+              {recommendation.label}
+            </Text>
+            <MaterialIcons 
+              name="arrow-forward-ios" 
+              size={11} 
+              color={isUser ? "#006FAD" : "#FFF"} 
+            />
+          </TouchableOpacity>
+        )}
       </View>
     );
   };
@@ -1343,48 +1606,65 @@ export default function KyraAI() {
 
   const renderMessage = ({ item }) => {
     const isUser = item.isUser;
+
+    // Parse recommendation tag for carousel rendering outside bubble
+    const recommendRegex = /\[RECOMMEND_CLASS:\s*category="([^"]+)",\s*label="([^"]+)"\]/i;
+    const recommendMatch = (!isUser && item.text) ? item.text.match(recommendRegex) : null;
+    const recommendedCategory = recommendMatch ? recommendMatch[1] : null;
+
     return (
-      <View style={[styles.messageContainer, isUser ? styles.userMessageContainer : styles.aiMessageContainer]}>
-        {!isUser && (
-          <View style={styles.aiAvatar}>
-            <Image
-              source={require("../../../assets/images/kyraAI.png")}
-              style={{ width: 24, height: 24 }}
+      <View style={{ width: "100%" }}>
+        <View style={[styles.messageContainer, isUser ? styles.userMessageContainer : styles.aiMessageContainer]}>
+          {!isUser && (
+            <View style={styles.aiAvatar}>
+              <Image
+                source={require("../../../assets/images/kyraAI.png")}
+                style={{ width: 24, height: 24 }}
+              />
+            </View>
+          )}
+          <View style={[styles.messageBubble, isUser ? styles.userBubble : styles.aiBubble]}>
+            {isUser ? (
+              <LinearGradient
+                colors={["#25ACE5", "#006FAD"]}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 0 }}
+                style={styles.userBubbleContent}
+              >
+                {item.isVoice ? (
+                  <VoiceMessagePlayer 
+                    uri={item.documents?.[0]?.s3_url || item.uri} 
+                    durationSecs={item.duration}
+                    transcript={item.text} 
+                  />
+                ) : (
+                  <>
+                    {renderAttachments(item.documents, true)}
+                    {item.text && renderMessageText(item.text, true)}
+                  </>
+                )}
+              </LinearGradient>
+            ) : (
+              <View style={item.text ? styles.aiBubbleContent : styles.aiBubbleContentCompact}>
+                {renderAttachments(item.documents, false)}
+                {item.text ? (
+                  renderMessageText(item.text, false)
+                ) : (
+                  <ThreeDotLoader />
+                )}
+              </View>
+            )}
+          </View>
+        </View>
+        {recommendedCategory && (
+          <View style={{ paddingLeft: 40, width: "100%" }}>
+            <NearbyClassesCarousel 
+              category={recommendedCategory} 
+              sessionsData={item.sessionsData}
+              onSaveData={(data) => saveMessageSessionsData(item.id, data)}
             />
           </View>
         )}
-        <View style={[styles.messageBubble, isUser ? styles.userBubble : styles.aiBubble]}>
-          {isUser ? (
-            <LinearGradient
-              colors={["#25ACE5", "#006FAD"]}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 0 }}
-              style={styles.userBubbleContent}
-            >
-              {item.isVoice ? (
-                <VoiceMessagePlayer 
-                  uri={item.documents?.[0]?.s3_url || item.uri} 
-                  durationSecs={item.duration}
-                  transcript={item.text} 
-                />
-              ) : (
-                <>
-                  {renderAttachments(item.documents, true)}
-                  {item.text && renderMessageText(item.text, true)}
-                </>
-              )}
-            </LinearGradient>
-          ) : (
-            <View style={item.text ? styles.aiBubbleContent : styles.aiBubbleContentCompact}>
-              {renderAttachments(item.documents, false)}
-              {item.text ? (
-                renderMessageText(item.text, false)
-              ) : (
-                <ThreeDotLoader />
-              )}
-            </View>
-          )}
-        </View>
       </View>
     );
   };
@@ -1487,7 +1767,7 @@ export default function KyraAI() {
           ref={flatListRef}
           data={messages}
           inverted={true}
-          keyExtractor={(item, index) => `${item.id}-${index}`}
+          keyExtractor={(item) => String(item.id)}
           renderItem={renderMessage}
           style={styles.messagesList}
           contentContainerStyle={styles.messagesContent}
@@ -1970,6 +2250,123 @@ const styles = StyleSheet.create({
   },
   recordingCancelBtn: {
     padding: 4,
+  },
+  recommendButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    alignSelf: "flex-start",
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderRadius: 20,
+    marginTop: 8,
+    gap: 6,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
+    elevation: 2,
+  },
+  recommendButtonText: {
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  userRecommendButton: {
+    backgroundColor: "#FFF",
+  },
+  userRecommendButtonText: {
+    color: "#006FAD",
+  },
+  aiRecommendButton: {
+    backgroundColor: "#006FAD",
+  },
+  aiRecommendButtonText: {
+    color: "#FFF",
+  },
+  carouselContainer: {
+    marginVertical: 12,
+    paddingHorizontal: 0,
+    width: "100%",
+  },
+  carouselTitle: {
+    fontSize: 14,
+    fontWeight: "700",
+    color: "#4A5568",
+    marginBottom: 10,
+  },
+  nearbyCardShadow: {
+    width: width * 0.52,
+    borderRadius: 14,
+    marginRight: 12,
+    backgroundColor: "#FFF",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  nearbyCard: {
+    width: "100%",
+    borderRadius: 14,
+    overflow: "hidden",
+    backgroundColor: "#F8FAFC",
+  },
+  nearbyCardBg: {
+    width: "100%",
+    height: 120,
+    justifyContent: "space-between",
+  },
+  nearbyCardTop: {
+    paddingTop: 10,
+    paddingLeft: 10,
+    paddingRight: 10,
+    paddingBottom: 4,
+  },
+  nearbyCardTitle: {
+    fontSize: 12,
+    fontWeight: "800",
+    color: "#FFF",
+  },
+  nearbyCardGymName: {
+    fontSize: 10,
+    fontWeight: "600",
+    color: "#FFF",
+    marginTop: 1,
+  },
+  nearbyCardDistance: {
+    fontSize: 9,
+    color: "rgba(255, 255, 255, 0.95)",
+    marginTop: 1,
+  },
+  nearbyCardBottom: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    padding: 10,
+  },
+  nearbyStartAt: {
+    fontSize: 8,
+    color: "rgba(255,255,255,0.85)",
+  },
+  nearbyTimeRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 3,
+  },
+  nearbyTime: {
+    fontSize: 9,
+    fontWeight: "700",
+    color: "#FF8E8E",
+  },
+  nearbyPricePill: {
+    backgroundColor: "#FF5757",
+    borderRadius: 10,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  nearbyPriceText: {
+    fontSize: 9,
+    fontWeight: "700",
+    color: "#FFF",
   },
   voicePlayerCard: {
     paddingVertical: 6,
