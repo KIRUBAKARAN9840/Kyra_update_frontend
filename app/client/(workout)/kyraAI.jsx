@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import {
   StyleSheet,
   Text,
@@ -35,6 +35,7 @@ import {
   getAIConsentAPI,
   postAIConsentAPI,
   getSessionsGymsAPI,
+  getMembershipGymsAPI,
 } from "../../../services/clientApi";
 import { getCachedLocation } from "../../../services/locationCache";
 import { useChatSound } from "../../../hooks/useChatSound";
@@ -243,15 +244,18 @@ const CATEGORY_MAP = {
   boxing: { id: 5, name: "Boxing" },
   swimming: { id: 13, name: "Swimming" },
   gymnastics: { id: 16, name: "Gymnastics" },
+  gym: { id: "gym", name: "Gym" },
+  gyms: { id: "gym", name: "Gym" },
+  all: { id: 3, name: "Yoga" },
 };
 
 const NearbyClassesCarousel = React.memo(({ category, sessionsData, onSaveData }) => {
   const router = useRouter();
-  const [loading, setLoading] = useState(!sessionsData);
-  const [sessions, setSessions] = useState(sessionsData || []);
+  const [loading, setLoading] = useState(!Array.isArray(sessionsData));
+  const [sessions, setSessions] = useState(Array.isArray(sessionsData) ? sessionsData : []);
 
   useEffect(() => {
-    if (sessionsData && sessionsData.length > 0) {
+    if (Array.isArray(sessionsData)) {
       setSessions(sessionsData);
       setLoading(false);
       return;
@@ -262,34 +266,65 @@ const NearbyClassesCarousel = React.memo(({ category, sessionsData, onSaveData }
       try {
         setLoading(true);
         const lower = category?.trim().toLowerCase() || "all";
-        const mapped = CATEGORY_MAP[lower] || CATEGORY_MAP["yoga"];
+        const mapped = CATEGORY_MAP[lower] || CATEGORY_MAP["yoga"] || { id: 3, name: "Yoga" };
 
         const coords = await getCachedLocation().catch(() => null);
 
-        const today = new Date();
-        const istOffset = 330 * 60 * 1000;
-        const todayIST = new Date(today.getTime() + istOffset);
-        const dateStr = todayIST.toISOString().split("T")[0];
+        let list = [];
+        if (mapped.id === "gym") {
+          const params = {
+            page: 1,
+            limit: 10,
+          };
+          if (coords) {
+            params.client_lat = coords.lat;
+            params.client_lng = coords.lng;
+          }
+          const res = await getMembershipGymsAPI(params);
+          if (res && res.status === 200 && active) {
+            list = (res.data || [])
+              .map((gym) => ({
+                ...gym,
+                gym_id: gym.gym_id,
+                gym_name: gym.gym_name,
+                image: gym.cover_pic,
+                distance_km: gym.distance_km != null ? Number(gym.distance_km) : null,
+                session_price: gym.membership_price,
+                plan_id: gym.plan_id,
+                duration: gym.duration,
+                isGym: true,
+              }))
+              .filter((gym) => gym.distance_km === null || gym.distance_km <= 10.0);
+          }
+        } else {
+          const today = new Date();
+          const istOffset = 330 * 60 * 1000;
+          const todayIST = new Date(today.getTime() + istOffset);
+          const dateStr = todayIST.toISOString().split("T")[0];
 
-        const params = {
-          session_id: mapped.id,
-          dates: [dateStr],
-          page: 1,
-          limit: 10,
-        };
-        if (coords) {
-          params.client_lat = coords.lat;
-          params.client_lng = coords.lng;
+          const params = {
+            session_id: mapped.id,
+            dates: [dateStr],
+            page: 1,
+            limit: 10,
+          };
+          if (coords) {
+            params.client_lat = coords.lat;
+            params.client_lng = coords.lng;
+          }
+
+          const res = await getSessionsGymsAPI(params);
+          if (res && res.status === 200 && active) {
+            list = (res.data || [])
+              .map((gym) => ({
+                ...gym,
+                distance_km: gym.distance_km != null ? Number(gym.distance_km) : null,
+              }))
+              .filter((gym) => gym.distance_km === null || gym.distance_km <= 10.0);
+          }
         }
 
-        const res = await getSessionsGymsAPI(params);
-        if (res && res.status === 200 && active) {
-          const list = (res.data || [])
-            .map((gym) => ({
-              ...gym,
-              distance_km: gym.distance_km != null ? Number(gym.distance_km) : null,
-            }))
-            .filter((gym) => gym.distance_km === null || gym.distance_km <= 10.0);
+        if (active) {
           setSessions(list);
           if (onSaveData) {
             onSaveData(list);
@@ -316,28 +351,32 @@ const NearbyClassesCarousel = React.memo(({ category, sessionsData, onSaveData }
     );
   }
 
-  if (sessions.length === 0) {
+  const lower = category?.trim().toLowerCase() || "all";
+  const mapped = CATEGORY_MAP[lower] || CATEGORY_MAP["yoga"] || { id: 3, name: "Yoga" };
+
+  const sessionsList = Array.isArray(sessions) ? sessions : [];
+
+  if (sessionsList.length === 0) {
     return (
       <View style={{ padding: 8, paddingHorizontal: 12 }}>
         <Text style={{ fontSize: 11, color: "rgba(255,255,255,0.7)", fontStyle: "italic" }}>
-          No classes found within 10 km today.
+          No {mapped?.id === "gym" ? "gyms" : "classes"} found within 10 km today.
         </Text>
       </View>
     );
   }
 
-  const lower = category?.trim().toLowerCase() || "all";
-  const mapped = CATEGORY_MAP[lower] || CATEGORY_MAP["yoga"];
-
   return (
     <View style={styles.carouselContainer}>
-      <Text style={styles.carouselTitle}>Nearby {mapped.name} Classes</Text>
+      <Text style={styles.carouselTitle}>
+        {mapped?.id === "gym" ? "Nearby Gyms" : `Nearby ${mapped?.name || "Fitness"} Classes`}
+      </Text>
       <ScrollView
         horizontal
         showsHorizontalScrollIndicator={false}
-        contentContainerStyle={{ paddingRight: 16 }}
+        contentContainerStyle={{ paddingHorizontal: 16 }}
       >
-        {sessions.map((item) => {
+        {sessionsList.map((item) => {
           const firstSlot = item.slots?.[0];
           const startStr = firstSlot?.start_time || "N/A";
 
@@ -347,30 +386,37 @@ const NearbyClassesCarousel = React.memo(({ category, sessionsData, onSaveData }
               activeOpacity={0.88}
               style={styles.nearbyCardShadow}
               onPress={() => {
-                const today = new Date();
-                const istOffset = 330 * 60 * 1000;
-                const todayIST = new Date(today.getTime() + istOffset);
-                const dateStr = todayIST.toISOString().split("T")[0];
+                if (item.isGym) {
+                  router.push({
+                    pathname: "/client/(membership)/onegym",
+                    params: { gym_id: String(item.gym_id), scroll_to_plans: "1" },
+                  });
+                } else {
+                  const today = new Date();
+                  const istOffset = 330 * 60 * 1000;
+                  const todayIST = new Date(today.getTime() + istOffset);
+                  const dateStr = todayIST.toISOString().split("T")[0];
 
-                const params = {
-                  gymId: String(item.gym_id),
-                  gymName: item.gym_name,
-                  sessionId: String(mapped.id),
-                  sessionName: mapped.name,
-                  scheduleId: firstSlot ? String(firstSlot.schedule_id) : "",
-                  slotTime: firstSlot ? `${firstSlot.start_time} - ${firstSlot.end_time}` : "",
-                  selectedDates: JSON.stringify([dateStr]),
-                };
-                router.push({
-                  pathname: "/client/(fitnessclass)/sessionCheckout",
-                  params,
-                });
+                  const params = {
+                    gymId: String(item.gym_id),
+                    gymName: item.gym_name,
+                    sessionId: String(mapped?.id || 3),
+                    sessionName: mapped?.name || "Yoga",
+                    scheduleId: firstSlot ? String(firstSlot.schedule_id) : "",
+                    slotTime: firstSlot ? `${firstSlot.start_time} - ${firstSlot.end_time}` : "",
+                    selectedDates: JSON.stringify([dateStr]),
+                  };
+                  router.push({
+                    pathname: "/client/(fitnessclass)/sessionCheckout",
+                    params,
+                  });
+                }
               }}
             >
               <View style={styles.nearbyCard}>
                 <ImageBackground
                   source={
-                    item.image && item.image.startsWith("http")
+                    item.image && typeof item.image === "string" && item.image.startsWith("http")
                       ? { uri: item.image }
                       : SESSION_IMAGES[mapped.name] || DEFAULT_SESSION_IMAGE
                   }
@@ -379,12 +425,12 @@ const NearbyClassesCarousel = React.memo(({ category, sessionsData, onSaveData }
                   resizeMode="cover"
                 >
                   <LinearGradient
-                    colors={["rgba(0,0,0,0.6)", "rgba(0,0,0,0)", "rgba(0,0,0,0.75)"]}
+                    colors={["rgba(0,0,0,0.2)", "rgba(0,0,0,0.28)", "rgba(0,0,0,0.90)"]}
                     style={StyleSheet.absoluteFillObject}
                   />
                   <View style={styles.nearbyCardTop}>
                     <Text style={styles.nearbyCardTitle} numberOfLines={1}>
-                      {mapped.name}
+                      {item.isGym ? "Gym Membership" : (mapped?.name || "Class")}
                     </Text>
                     <Text style={styles.nearbyCardGymName} numberOfLines={1}>
                       {item.gym_name}
@@ -397,18 +443,22 @@ const NearbyClassesCarousel = React.memo(({ category, sessionsData, onSaveData }
                   </View>
                   <View style={styles.nearbyCardBottom}>
                     <View>
-                      <Text style={styles.nearbyStartAt}>Start at</Text>
+                      <Text style={styles.nearbyStartAt}>{item.isGym ? "Location" : "Start at"}</Text>
                       <View style={styles.nearbyTimeRow}>
-                        <Ionicons name="time-outline" size={10} color="#FF8E8E" />
+                        <Ionicons 
+                          name={item.isGym ? "pin-outline" : "time-outline"} 
+                          size={10} 
+                          color="#FF8E8E" 
+                        />
                         <Text style={styles.nearbyTime} numberOfLines={1}>
-                          {startStr}
+                          {item.isGym ? item.area || "Nearby" : startStr}
                         </Text>
                       </View>
                     </View>
                     {item.session_price != null && (
                       <View style={styles.nearbyPricePill}>
                         <Text style={styles.nearbyPriceText}>
-                          ₹{item.session_price} only
+                          ₹{item.session_price}{item.isGym ? `/${item.duration || 1}m` : " only"}
                         </Text>
                       </View>
                     )}
@@ -520,6 +570,16 @@ export default function KyraAI() {
   const [userName, setUserName] = useState("there");
   const [inputText, setInputText] = useState("");
   const [messages, setMessages] = useState([]);
+  const uniqueMessages = useMemo(() => {
+    const seen = new Set();
+    return messages.filter((msg) => {
+      if (!msg || !msg.id) return false;
+      const key = String(msg.id);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }, [messages]);
   const [keyboardHeight, setKeyboardHeight] = useState(0);
 
   const [selectedImage, setSelectedImage] = useState(null);
@@ -1205,6 +1265,7 @@ export default function KyraAI() {
     setIsTyping(true);
     const aiId = `ai-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     setCurrentMessageId(aiId);
+    let accumulatedText = "";
 
     shouldScrollToBottomRef.current = true;
     setMessages((prev) => [
@@ -1222,6 +1283,7 @@ export default function KyraAI() {
     safeCloseSSE();
 
     const finalize = () => {
+      // console.log("⬅️ KYRA RESPONSE MESSAGE:", accumulatedText);
       setMessages((prev) =>
         prev.map((m) =>
           m.id === aiId ? { ...m, isComplete: true, isStreaming: false } : m,
@@ -1237,6 +1299,8 @@ export default function KyraAI() {
     const handleMessage = (event) => {
       const payload = event?.data;
       if (!payload) return;
+
+      accumulatedText += (accumulatedText ? "\n" : "") + payload;
 
       if (!hasPlayedReceiveSound) {
         hasPlayedReceiveSound = true;
@@ -1265,12 +1329,34 @@ export default function KyraAI() {
       const token = await chatbotAPI.getValidToken();
       if (!token) throw new Error("Failed to get valid token");
 
+      // Find the latest assistant message with sessionsData to build recommendation context
+      const lastSessionIdx = messages.findIndex(m => m && !m.isUser && m.sessionsData && m.sessionsData.length > 0);
+      let textWithContext = messageText;
+      if (lastSessionIdx !== -1 && lastSessionIdx < 5) {
+        const msg = messages[lastSessionIdx];
+        const items = msg.sessionsData;
+        if (Array.isArray(items) && items.length > 0) {
+          const contextBlock = "\n\n[RECOMMENDED OPTIONS IN THE CAROUSEL DISPLAYED TO USER]\n" + 
+            items.map(item => {
+              const name = item.gym_name || item.name || "Unknown";
+              const price = item.session_price != null ? `₹${item.session_price}` : "N/A";
+              const dist = item.distance_km != null ? `${item.distance_km.toFixed(2)} km` : "N/A";
+              const type = item.isGym ? "Gym Membership" : "Fitness Class";
+              const duration = item.isGym ? `for ${item.duration || 1} month(s)` : "";
+              const firstSlot = item.slots?.[0];
+              const timing = item.isGym ? (item.area || "Nearby") : (firstSlot?.start_time || "N/A");
+              return `- ${name} (${type}): Price ${price} ${duration}, Distance ${dist}, Location/Timing: ${timing}`;
+            }).join("\n");
+          textWithContext += contextBlock;
+        }
+      }
+
       let endpoint = `/api/v2/chatbot/chat/stream_test?user_id=${encodeURIComponent(clientId)}&request_type=${requestType}`;
       if (attachments && attachments.length > 0) {
         endpoint += `&attachments=${encodeURIComponent(JSON.stringify(attachments))}`;
       }
       const es = await chatbotAPI.openSSE({
-        text: messageText,
+        text: textWithContext,
         endpoint,
         onMessage: handleMessage,
         token,
@@ -1328,6 +1414,7 @@ export default function KyraAI() {
     const attachments = currentImage && currentImage.attachment ? [currentImage.attachment] : [];
     const messageText = txt || (currentImage ? `Sent image: ${currentImage.name}` : "");
 
+    // console.log("➡️ USER REQUEST MESSAGE:", messageText);
     shouldScrollToBottomRef.current = true;
     setMessages((prev) => [
       {
@@ -1384,7 +1471,7 @@ export default function KyraAI() {
                 <Ionicons
                   name={isImage ? "image" : "document-text"}
                   size={24}
-                  color={isUser ? "#FFF" : "#006FAD"}
+                  color="#006FAD"
                 />
               </View>
               <View style={styles.attachmentMeta}>
@@ -1409,7 +1496,7 @@ export default function KyraAI() {
               <Ionicons
                 name="open-outline"
                 size={16}
-                color={isUser ? "rgba(255,255,255,0.7)" : "#666"}
+                color="#666"
               />
             </TouchableOpacity>
           );
@@ -1616,21 +1703,17 @@ export default function KyraAI() {
       <View style={{ width: "100%" }}>
         <View style={[styles.messageContainer, isUser ? styles.userMessageContainer : styles.aiMessageContainer]}>
           {!isUser && (
-            <View style={styles.aiAvatar}>
+            /* <View style={styles.aiAvatar}>
               <Image
                 source={require("../../../assets/images/kyraAI.png")}
                 style={{ width: 24, height: 24 }}
               />
-            </View>
+            </View> */
+            null
           )}
           <View style={[styles.messageBubble, isUser ? styles.userBubble : styles.aiBubble]}>
             {isUser ? (
-              <LinearGradient
-                colors={["#25ACE5", "#006FAD"]}
-                start={{ x: 0, y: 0 }}
-                end={{ x: 1, y: 0 }}
-                style={styles.userBubbleContent}
-              >
+              <View style={styles.userBubbleContent}>
                 {item.isVoice ? (
                   <VoiceMessagePlayer 
                     uri={item.documents?.[0]?.s3_url || item.uri} 
@@ -1643,7 +1726,7 @@ export default function KyraAI() {
                     {item.text && renderMessageText(item.text, true)}
                   </>
                 )}
-              </LinearGradient>
+              </View>
             ) : (
               <View style={item.text ? styles.aiBubbleContent : styles.aiBubbleContentCompact}>
                 {renderAttachments(item.documents, false)}
@@ -1657,7 +1740,7 @@ export default function KyraAI() {
           </View>
         </View>
         {recommendedCategory && (
-          <View style={{ paddingLeft: 40, width: "100%" }}>
+          <View style={{ width: "100%" }}>
             <NearbyClassesCarousel 
               category={recommendedCategory} 
               sessionsData={item.sessionsData}
@@ -1673,12 +1756,12 @@ export default function KyraAI() {
     if (!isThinking) return null;
     return (
       <View style={styles.aiMessageContainer}>
-        <View style={styles.aiAvatar}>
+        {/* <View style={styles.aiAvatar}>
           <Image
             source={require("../../../assets/images/kyraAI.png")}
             style={{ width: 24, height: 24 }}
           />
-        </View>
+        </View> */}
         <View style={styles.aiMessageBubble}>
           <View style={styles.aiBubbleContentCompact}>
             <ThreeDotLoader />
@@ -1692,12 +1775,12 @@ export default function KyraAI() {
     if (!isTyping || currentMessageId) return null;
     return (
       <View style={styles.aiMessageContainer}>
-        <View style={styles.aiAvatar}>
+        {/* <View style={styles.aiAvatar}>
           <Image
             source={require("../../../assets/images/kyraAI.png")}
             style={{ width: 24, height: 24 }}
           />
-        </View>
+        </View> */}
         <View style={styles.aiMessageBubble}>
           <View style={styles.aiBubbleContentCompact}>
             <ThreeDotLoader />
@@ -1763,9 +1846,15 @@ export default function KyraAI() {
         behavior={Platform.OS === "ios" ? "padding" : undefined}
         keyboardVerticalOffset={0}
       >
-        <FlatList
+        <ImageBackground
+          source={require("../../../assets/images/chatbot_bg/chatbot_bg.png")}
+          style={{ flex: 1 }}
+          imageStyle={{ opacity: 0.4 }}
+          resizeMode="cover"
+        >
+          <FlatList
           ref={flatListRef}
-          data={messages}
+          data={uniqueMessages}
           inverted={true}
           keyExtractor={(item) => String(item.id)}
           renderItem={renderMessage}
@@ -1782,7 +1871,7 @@ export default function KyraAI() {
             </>
           )}
           ListFooterComponent={() => {
-            if (isLoadingHistory && messages.length > 0) {
+            if (isLoadingHistory && uniqueMessages.length > 0) {
               return (
                 <View style={{ paddingVertical: 12, alignItems: "center" }}>
                   <ActivityIndicator size="small" color="#006FAD" />
@@ -1837,7 +1926,7 @@ export default function KyraAI() {
                 <View style={styles.recordingWrapper}>
                   {/* Blinking blue mic */}
                   <Animated.View style={{ opacity: pulseAnim }}>
-                    <Ionicons name="mic" size={20} color="#006FAD" />
+                    <Ionicons name="mic" size={20} color="#FF4D4D" />
                   </Animated.View>
 
                   {/* Timer */}
@@ -1975,7 +2064,8 @@ export default function KyraAI() {
             </Text>
           </View>
         </SafeAreaView>
-      </KeyboardAvoidingView>
+      </ImageBackground>
+    </KeyboardAvoidingView>
 
       {/* AI Consent Modal
       <Modal
@@ -2123,20 +2213,25 @@ const styles = StyleSheet.create({
   headerSubtitle: { fontSize: 10, color: "#666", marginTop: 0 },
   clearChatButton: { padding: 8 },
 
-  chatContainer: { flex: 1, backgroundColor: "#FFFFFF" },
+  chatContainer: { flex: 1, backgroundColor: "transparent" },
   messagesList: { flex: 1, paddingHorizontal: 16 },
   messagesContent: { paddingTop: 20, paddingBottom: 10 },
-  messageContainer: { marginVertical: 6, maxWidth: width * 0.8, flexDirection: "row", alignItems: "flex-end" },
+  messageContainer: { marginVertical: 10, maxWidth: width * 0.8, flexDirection: "row", alignItems: "flex-end" },
   userMessageContainer: { alignSelf: "flex-end" },
   aiMessageContainer: { alignSelf: "flex-start" },
   aiAvatar: { marginRight: 8, marginBottom: 2 },
 
   messageBubble: { borderRadius: 18, overflow: "hidden" },
-  userBubble: { borderBottomRightRadius: 4 },
+  userBubble: { 
+    borderBottomRightRadius: 4, 
+    backgroundColor: "#FFF7F7",
+    borderWidth: 1,
+    borderColor: "#FFE5E5",
+  },
   aiBubble: { borderBottomLeftRadius: 4, backgroundColor: "#F0F0F0" },
   userBubbleContent: { paddingVertical: 10, paddingHorizontal: 16 },
   aiBubbleContent: { paddingVertical: 10, paddingHorizontal: 16 },
-  userMessageText: { fontSize: 15, color: "#FFFFFF", lineHeight: 22 },
+  userMessageText: { fontSize: 15, color: "#333333", lineHeight: 22 },
   aiMessageText: { fontSize: 15, color: "#333333", lineHeight: 22 },
 
   thinkingBubble: {
@@ -2222,7 +2317,9 @@ const styles = StyleSheet.create({
     flex: 1,
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#E6F7FF",
+    backgroundColor: "#FFF7F7",
+    borderWidth: 1,
+    borderColor: "#FFE5E5",
     borderRadius: 25,
     paddingHorizontal: 16,
     paddingVertical: 6,
@@ -2231,7 +2328,7 @@ const styles = StyleSheet.create({
   recordingTimer: {
     fontSize: 14,
     fontWeight: "600",
-    color: "#006FAD",
+    color: "#FF4D4D",
     marginLeft: 8,
   },
   wavesContainer: {
@@ -2246,7 +2343,7 @@ const styles = StyleSheet.create({
     width: 3,
     height: 20,
     borderRadius: 1.5,
-    backgroundColor: "#006FAD",
+    backgroundColor: "#FF4D4D",
   },
   recordingCancelBtn: {
     padding: 4,
@@ -2284,14 +2381,15 @@ const styles = StyleSheet.create({
   },
   carouselContainer: {
     marginVertical: 12,
-    paddingHorizontal: 0,
-    width: "100%",
+    marginHorizontal: -16,
+    width: width,
   },
   carouselTitle: {
     fontSize: 14,
     fontWeight: "700",
     color: "#4A5568",
     marginBottom: 10,
+    paddingHorizontal: 16,
   },
   nearbyCardShadow: {
     width: width * 0.52,
@@ -2393,14 +2491,14 @@ const styles = StyleSheet.create({
   },
   voiceProgressBarBg: {
     height: 3,
-    backgroundColor: "rgba(255, 255, 255, 0.3)",
+    backgroundColor: "#FFE5E5",
     borderRadius: 1.5,
     width: "100%",
     marginBottom: 4,
   },
   voiceProgressBarFill: {
     height: 3,
-    backgroundColor: "#FFF",
+    backgroundColor: "#006FAD",
     borderRadius: 1.5,
   },
   voiceTimeLabelsRow: {
@@ -2409,7 +2507,7 @@ const styles = StyleSheet.create({
   },
   voiceTimeLabel: {
     fontSize: 9,
-    color: "rgba(255, 255, 255, 0.8)",
+    color: "#666",
   },
   voiceTranscriptWrapper: {
     marginTop: 8,
@@ -2508,7 +2606,9 @@ const styles = StyleSheet.create({
     marginBottom: 4,
   },
   userAttachmentCard: {
-    backgroundColor: "rgba(255, 255, 255, 0.15)",
+    backgroundColor: "#FFF0F0",
+    borderWidth: 1,
+    borderColor: "#FFE5E5",
   },
   aiAttachmentCard: {
     backgroundColor: "#F0F4F8",
@@ -2533,7 +2633,7 @@ const styles = StyleSheet.create({
     fontWeight: "600",
   },
   userAttachmentText: {
-    color: "#FFF",
+    color: "#333",
   },
   aiAttachmentText: {
     color: "#333",
@@ -2543,7 +2643,7 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
   userAttachmentSubtext: {
-    color: "rgba(255, 255, 255, 0.7)",
+    color: "#666",
   },
   aiAttachmentSubtext: {
     color: "#666",
